@@ -11,11 +11,7 @@ logger = logging.getLogger(__name__)
 last_alerted = {}
 last_whale_alerted = set()
 snoozed = set()
-scan_stats = {
-    "last_scan": "Never", "tokens_scanned": 0,
-    "alerts_sent": 0, "last_whale_scan": "Never",
-    "whale_contracts_resolved": 0
-}
+scan_stats = {"last_scan":"Never","tokens_scanned":0,"alerts_sent":0,"last_whale_scan":"Never","whale_contracts_resolved":0}
 ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -24,18 +20,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ALERT_CHAT_IDS.append(chat_id)
     await update.message.reply_text(
         "🔮 *Crime Watch — Full Pre-Pump Intelligence*\n\n"
-        "Two autonomous scanners. Every Binance futures token. No lists.\n\n"
-        "📊 *Scanner 1 — Market signals (every 10 mins):*\n"
+        "Two autonomous scanners. Every Binance futures token.\n\n"
+        "📊 *Market scanner (every 10 mins):*\n"
         "  • Negative funding rate\n"
         "  • Heavy short positioning\n"
         "  • OI building on low volume\n"
         "  • Price coiling + basis spread\n\n"
-        "🐋 *Scanner 2 — Whale activity (every 60 mins):*\n"
-        "  • Auto-discovers contracts for ALL Binance tokens\n"
-        "  • Monitors Binance hot wallets on-chain\n"
-        "  • Alerts when >3% of supply leaves in one tx\n\n"
+        "🐋 *Whale scanner (every 60 mins):*\n"
+        "  • Large withdrawals from Binance hot wallets\n"
+        "  • Single tx removing >3% of circulating supply\n\n"
         "*Alert levels:*\n"
-        "  💎 65–74 — High conviction\n"
+        "  💎 65-74 — High conviction\n"
         "  🚀 75+ — Extreme conviction\n"
         "  🚨 Pump signal — All signals aligned\n"
         "  🐋 Whale alert — Supply shock detected\n\n"
@@ -161,11 +156,7 @@ def fmt_whale(alert):
     ])
 
 async def send_market_alert(app, result, level):
-    labels = {
-        "high":    "💎 HIGH CONVICTION",
-        "extreme": "🚀 EXTREME SETUP",
-        "pump":    "🚨 LIVE PUMP SIGNAL"
-    }
+    labels = {"high":"💎 HIGH CONVICTION","extreme":"🚀 EXTREME SETUP","pump":"🚨 LIVE PUMP SIGNAL"}
     text = f"{labels.get(level,'🔔')} — *{result['symbol']}*\n\n" + fmt(result)
     scan_stats["alerts_sent"] += 1
     for cid in ALERT_CHAT_IDS:
@@ -221,7 +212,7 @@ async def market_scan_loop(app):
 
 async def whale_scan_loop(app):
     import aiohttp
-    await asyncio.sleep(120)  # wait 2 mins after startup
+    await asyncio.sleep(120)
     while True:
         if not ETHERSCAN_API_KEY:
             logger.warning("No ETHERSCAN_API_KEY — skipping whale scan")
@@ -229,24 +220,42 @@ async def whale_scan_loop(app):
             continue
         try:
             scan_stats["last_whale_scan"] = datetime.datetime.now().strftime("%H:%M:%S")
-            logger.info("Whale scan starting — fetching ALL Binance symbols...")
+            logger.info("Whale scan starting...")
             async with aiohttp.ClientSession(
                 headers={"User-Agent":"CrimeWatch/1.0"},
                 timeout=aiohttp.ClientTimeout(total=20)
             ) as session:
                 symbols = await get_binance_symbols(session)
-            # ALL symbols — no limit
-            logger.info(f"Whale scan: resolving contracts for {len(symbols)} tokens...")
             findings = await scan_whale_activity(symbols, ETHERSCAN_API_KEY)
             scan_stats["whale_contracts_resolved"] = len(findings)
-            new_alerts = 0
             for alert in findings:
                 tx_hash = alert.get("tx_hash")
                 if tx_hash and tx_hash not in last_whale_alerted:
                     last_whale_alerted.add(tx_hash)
                     await send_whale_alert(app, alert)
-                    new_alerts += 1
-            logger.info(f"Whale scan complete. {new_alerts} new alerts.")
+            logger.info(f"Whale scan done. {len(findings)} alerts.")
         except Exception as e:
             logger.error(f"Whale cycle error: {e}")
-        await asyncio.sleep(60 * 60)  # every 60 mins
+        await asyncio.sleep(60 * 60)
+
+async def main():
+    req = HTTPXRequest(connect_timeout=30, read_timeout=30, write_timeout=30)
+    app = Application.builder().token(BOT_TOKEN).request(req).build()
+    for cmd, fn in [
+        ("start", start), ("scan", scan_cmd),
+        ("snooze", snooze_cmd), ("unsnooze", unsnooze_cmd),
+        ("status", status_cmd)
+    ]:
+        app.add_handler(CommandHandler(cmd, fn))
+    logger.info("Crime Watch — market + whale scanners active")
+    async with app:
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        asyncio.create_task(market_scan_loop(app))
+        asyncio.create_task(whale_scan_loop(app))
+        await asyncio.Event().wait()
+        await app.updater.stop()
+        await app.stop()
+
+if __name__ == "__main__":
+    asyncio.run(main())
