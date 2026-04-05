@@ -1,4 +1,4 @@
-import aiohttp, logging
+import aiohttp, asyncio, logging
 from memory import detect_dynamic_signals, load_memory
 logger = logging.getLogger(__name__)
 BINANCE = "https://fapi.binance.com"
@@ -6,7 +6,7 @@ load_memory()
 
 async def get_binance_symbols(session):
     try:
-        async with session.get(f"{BINANCE}/fapi/v1/ticker/24hr") as r:
+        async with session.get(f"{BINANCE}/fapi/v1/ticker/24hr", timeout=aiohttp.ClientTimeout(total=30)) as r:
             data = await r.json() if r.status == 200 else []
         usdt = [t for t in data if t.get("symbol","").endswith("USDT")]
         usdt.sort(key=lambda x: float(x.get("quoteVolume",0)), reverse=True)
@@ -16,16 +16,16 @@ async def get_binance_symbols(session):
 
 async def fetch_binance(session, symbol):
     try:
-        async with session.get(f"{BINANCE}/fapi/v1/ticker/24hr?symbol={symbol}") as r:
+        async with session.get(f"{BINANCE}/fapi/v1/ticker/24hr?symbol={symbol}", timeout=aiohttp.ClientTimeout(total=30)) as r:
             ticker = await r.json() if r.status == 200 else {}
         if not ticker or float(ticker.get("lastPrice",0)) == 0: return {"found":False}
-        async with session.get(f"{BINANCE}/fapi/v1/fundingRate?symbol={symbol}&limit=1") as r:
+        async with session.get(f"{BINANCE}/fapi/v1/fundingRate?symbol={symbol}&limit=1", timeout=aiohttp.ClientTimeout(total=30)) as r:
             fd = await r.json() if r.status == 200 else []
-        async with session.get(f"{BINANCE}/fapi/v1/openInterest?symbol={symbol}") as r:
+        async with session.get(f"{BINANCE}/fapi/v1/openInterest?symbol={symbol}", timeout=aiohttp.ClientTimeout(total=30)) as r:
             oi = await r.json() if r.status == 200 else {}
-        async with session.get(f"{BINANCE}/futures/data/globalLongShortAccountRatio?symbol={symbol}&period=1h&limit=1") as r:
+        async with session.get(f"{BINANCE}/futures/data/globalLongShortAccountRatio?symbol={symbol}&period=1h&limit=1", timeout=aiohttp.ClientTimeout(total=30)) as r:
             ls = await r.json() if r.status == 200 else []
-        async with session.get(f"{BINANCE}/fapi/v1/premiumIndex?symbol={symbol}") as r:
+        async with session.get(f"{BINANCE}/fapi/v1/premiumIndex?symbol={symbol}", timeout=aiohttp.ClientTimeout(total=30)) as r:
             pm = await r.json() if r.status == 200 else {}
         price=float(ticker.get("lastPrice",0)); vol=float(ticker.get("quoteVolume",0))
         oi_val=float(oi.get("openInterest",0))*price
@@ -41,9 +41,18 @@ async def fetch_binance(session, symbol):
         logger.warning(f"Binance error {symbol}: {e}"); return {"found":False}
 
 async def fetch_data(symbol):
-    async with aiohttp.ClientSession(headers={"User-Agent":"CrimeWatch/1.0"},timeout=aiohttp.ClientTimeout(total=10)) as s:
-        d = await fetch_binance(s, symbol)
-        if d.get("found"): return d
+    connector = aiohttp.TCPConnector(ssl=False, limit=100)
+    async with aiohttp.ClientSession(
+        connector=connector,
+        headers={"User-Agent":"Mozilla/5.0 (compatible; CrimeWatch/1.0)"},
+        timeout=aiohttp.ClientTimeout(total=30)
+    ) as s:
+        # retry up to 3 times
+        for attempt in range(3):
+            d = await fetch_binance(s, symbol)
+            if d.get("found"): return d
+            if attempt < 2:
+                await asyncio.sleep(2)
     return {"found":False,"error":f"{symbol} not found on Binance futures"}
 
 def score_static(data):
