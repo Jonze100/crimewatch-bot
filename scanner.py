@@ -1,58 +1,72 @@
 import aiohttp, asyncio, logging
 from memory import detect_dynamic_signals, load_memory
 logger = logging.getLogger(__name__)
-BINANCE = "https://fapi.binance.com"
 load_memory()
 
-async def get_binance_symbols(session):
+# Binance blocks some cloud IPs — use multiple fallback endpoints
+BINANCE_ENDPOINTS = [
+    "https://fapi.binance.com",
+    "https://fapi1.binance.com", 
+    "https://fapi2.binance.com",
+    "https://fapi3.binance.com",
+]
+
+async def safe_get(session, url):
     try:
-        async with session.get(f"{BINANCE}/fapi/v1/ticker/24hr", timeout=aiohttp.ClientTimeout(total=30)) as r:
-            data = await r.json() if r.status == 200 else []
-        usdt = [t for t in data if t.get("symbol","").endswith("USDT")]
-        usdt.sort(key=lambda x: float(x.get("quoteVolume",0)), reverse=True)
-        return [t["symbol"] for t in usdt]
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            if r.status == 200:
+                return await r.json()
     except Exception as e:
-        logger.warning(f"Symbol fetch error: {e}"); return []
+        logger.warning(f"Request failed {url}: {e}")
+    return None
+
+async def get_binance_symbols(session):
+    for base in BINANCE_ENDPOINTS:
+        try:
+            data = await safe_get(session, f"{base}/fapi/v1/ticker/24hr")
+            if data and isinstance(data, list):
+                usdt = [t for t in data if t.get("symbol","").endswith("USDT")]
+                usdt.sort(key=lambda x: float(x.get("quoteVolume",0)), reverse=True)
+                logger.info(f"Got {len(usdt)} symbols from {base}")
+                return [t["symbol"] for t in usdt]
+        except Exception as e:
+            logger.warning(f"Symbol fetch failed {base}: {e}")
+    return []
 
 async def fetch_binance(session, symbol):
-    try:
-        async with session.get(f"{BINANCE}/fapi/v1/ticker/24hr?symbol={symbol}", timeout=aiohttp.ClientTimeout(total=30)) as r:
-            ticker = await r.json() if r.status == 200 else {}
-        if not ticker or float(ticker.get("lastPrice",0)) == 0: return {"found":False}
-        async with session.get(f"{BINANCE}/fapi/v1/fundingRate?symbol={symbol}&limit=1", timeout=aiohttp.ClientTimeout(total=30)) as r:
-            fd = await r.json() if r.status == 200 else []
-        async with session.get(f"{BINANCE}/fapi/v1/openInterest?symbol={symbol}", timeout=aiohttp.ClientTimeout(total=30)) as r:
-            oi = await r.json() if r.status == 200 else {}
-        async with session.get(f"{BINANCE}/futures/data/globalLongShortAccountRatio?symbol={symbol}&period=1h&limit=1", timeout=aiohttp.ClientTimeout(total=30)) as r:
-            ls = await r.json() if r.status == 200 else []
-        async with session.get(f"{BINANCE}/fapi/v1/premiumIndex?symbol={symbol}", timeout=aiohttp.ClientTimeout(total=30)) as r:
-            pm = await r.json() if r.status == 200 else {}
-        price=float(ticker.get("lastPrice",0)); vol=float(ticker.get("quoteVolume",0))
-        oi_val=float(oi.get("openInterest",0))*price
-        fr=float(fd[0]["fundingRate"])*100 if fd else None
-        lsr=float(ls[0]["longShortRatio"]) if ls else None
-        mp=float(pm.get("markPrice",price)); ip=float(pm.get("indexPrice",price))
-        basis=((mp-ip)/ip*100) if ip>0 else 0
-        return {"exchange":"Binance","price":price,"volume_24h":vol,"open_interest":oi_val,
-                "funding_rate":fr,"ls_ratio":lsr,"basis":basis,
-                "price_change_24h":float(ticker.get("priceChangePercent",0)),
-                "high_24h":float(ticker.get("highPrice",0)),"low_24h":float(ticker.get("lowPrice",0)),"found":price>0}
-    except Exception as e:
-        logger.warning(f"Binance error {symbol}: {e}"); return {"found":False}
+    for base in BINANCE_ENDPOINTS:
+        try:
+            ticker = await safe_get(session, f"{base}/fapi/v1/ticker/24hr?symbol={symbol}")
+            if not ticker or float(ticker.get("lastPrice",0)) == 0:
+                continue
+            fd  = await safe_get(session, f"{base}/fapi/v1/fundingRate?symbol={symbol}&limit=1") or []
+            oi  = await safe_get(session, f"{base}/fapi/v1/openInterest?symbol={symbol}") or {}
+            ls  = await safe_get(session, f"{base}/futures/data/globalLongShortAccountRatio?symbol={symbol}&period=1h&limit=1") or []
+            pm  = await safe_get(session, f"{base}/fapi/v1/premiumIndex?symbol={symbol}") or {}
+            price = float(ticker.get("lastPrice",0))
+            vol   = float(ticker.get("quoteVolume",0))
+            oi_val= float(oi.get("openInterest",0)) * price
+            fr    = float(fd[0]["fundingRate"]) * 100 if fd else None
+            lsr   = float(ls[0]["longShortRatio"]) if ls else None
+            mp    = float(pm.get("markPrice", price))
+            ip    = float(pm.get("indexPrice", price))
+            basis = ((mp - ip) / ip * 100) if ip > 0 else 0
+            return {"exchange":"Binance","price":price,"volume_24h":vol,"open_interest":oi_val,
+                    "funding_rate":fr,"ls_ratio":lsr,"basis":basis,
+                    "price_change_24h":float(ticker.get("priceChangePercent",0)),
+                    "high_24h":float(ticker.get("highPrice",0)),
+                    "low_24h":float(ticker.get("lowPrice",0)),"found":price>0}
+        except Exception as e:
+            logger.warning(f"Binance error {base} {symbol}: {e}")
+    return {"found":False}
 
 async def fetch_data(symbol):
-    connector = aiohttp.TCPConnector(ssl=False, limit=100)
     async with aiohttp.ClientSession(
-        connector=connector,
-        headers={"User-Agent":"Mozilla/5.0 (compatible; CrimeWatch/1.0)"},
+        headers={"User-Agent":"Mozilla/5.0"},
         timeout=aiohttp.ClientTimeout(total=30)
     ) as s:
-        # retry up to 3 times
-        for attempt in range(3):
-            d = await fetch_binance(s, symbol)
-            if d.get("found"): return d
-            if attempt < 2:
-                await asyncio.sleep(2)
+        d = await fetch_binance(s, symbol)
+        if d.get("found"): return d
     return {"found":False,"error":f"{symbol} not found on Binance futures"}
 
 def score_static(data):
