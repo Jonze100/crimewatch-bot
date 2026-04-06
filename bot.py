@@ -20,15 +20,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in ALERT_CHAT_IDS:
         ALERT_CHAT_IDS.append(chat_id)
     await update.message.reply_text(
-        "🔮 *Crime Watch — Pure Crime Pump Detector*\n\n"
-        "Only alerts when ALL conditions align:\n\n"
-        "  ✅ Funding neutral or negative\n"
-        "  ✅ L/S ratio below 0.80 — market short\n"
-        "  ✅ Volume under $50M — pump not started\n"
-        "  ✅ Price flat — you're early\n"
-        "  ✅ OI building — leveraged positions loading\n"
-        "  ✅ Score 75+ or live pump signal\n\n"
-        "Expect 5–15 quality alerts per day max.\n\n"
+        "🔮 *Crime Watch*\n\n"
+        "Alerts you only when a genuine crime pump setup is detected.\n\n"
+        "*Criteria:*\n"
+        "  • Funding rate negative\n"
+        "  • L/S ratio below 0.67\n"
+        "  • Negative basis\n"
+        "  • Score 75+\n\n"
         "• /scan SYMBOL — Manual scan\n"
         "• /status — Scanner status\n"
         "• /snooze SYMBOL — Mute a token",
@@ -67,12 +65,11 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 *Market scanner:*\n"
         f"  • Last scan: {scan_stats['last_scan']}\n"
         f"  • Tokens scanned: {scan_stats['tokens_scanned']}\n"
-        f"  • Min score: {MIN_ALERT_SCORE}/100\n\n"
+        f"  • Filter: negative funding + L/S <0.67 + negative basis\n\n"
         f"🐋 *Whale scanner:*\n"
         f"  • Last scan: {scan_stats['last_whale_scan']}\n"
         f"  • Contracts resolved: {scan_stats['whale_contracts_resolved']}\n\n"
         f"  • Total alerts sent: {scan_stats['alerts_sent']}\n"
-        f"  • Snoozed: {len(snoozed)} tokens\n"
         f"  • Your chat ID: `{update.effective_chat.id}`",
         parse_mode="Markdown"
     )
@@ -147,13 +144,8 @@ def fmt_whale(alert):
         f"[Trade on Binance](https://www.binance.com/en/futures/{symbol}USDT)"
     ])
 
-async def send_alert(app, result, level):
-    labels = {
-        "crime":   "🚨 CRIME PUMP SETUP DETECTED",
-        "pump":    "🚨 LIVE PUMP SIGNAL",
-        "whale":   "🐋 WHALE ALERT"
-    }
-    text = f"{labels.get(level,'🔔')} — *{result['symbol']}*\n\n" + fmt(result)
+async def send_crime_alert(app, result):
+    text = f"🚨 *CRIME PUMP SETUP DETECTED — {result['symbol']}*\n\n" + fmt(result)
     scan_stats["alerts_sent"] += 1
     for cid in ALERT_CHAT_IDS:
         try:
@@ -181,24 +173,16 @@ async def market_scan_loop(app):
             ) as session:
                 symbols = await get_binance_symbols(session)
             scan_stats["tokens_scanned"] = len(symbols)
-            logger.info(f"Scanning {len(symbols)} tokens...")
             for symbol in symbols:
                 if symbol in snoozed: continue
                 try:
                     result = await scan_token(symbol)
-                    sc   = result.get("crime_score", 0)
-                    pump = result.get("pump_signal", False)
                     prev = last_alerted.get(symbol, 0)
-
-                    # Run through crime pump filter first
                     is_crime, reason = is_crime_pump_setup(result)
-
-                    if is_crime and sc > prev + 8:
-                        level = "pump" if pump else "crime"
-                        await send_alert(app, result, level)
-                        last_alerted[symbol] = sc
-                        logger.info(f"ALERT: {symbol} {sc}/100 — {reason}")
-
+                    if is_crime and result["crime_score"] > prev + 8:
+                        await send_crime_alert(app, result)
+                        last_alerted[symbol] = result["crime_score"]
+                        logger.info(f"CRIME ALERT: {symbol} — {reason}")
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     logger.error(f"Scan error {symbol}: {e}")
@@ -240,7 +224,7 @@ async def main():
         ("status", status_cmd)
     ]:
         app.add_handler(CommandHandler(cmd, fn))
-    logger.info("Crime Watch — pure crime pump filter active")
+    logger.info("Crime Watch — crime pump detector active")
     async with app:
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
