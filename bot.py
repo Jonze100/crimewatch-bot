@@ -21,12 +21,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ALERT_CHAT_IDS.append(chat_id)
     await update.message.reply_text(
         "🔮 *Crime Watch*\n\n"
-        "Alerts you only when a genuine crime pump setup is detected.\n\n"
-        "*Criteria:*\n"
-        "  • Funding rate negative\n"
-        "  • L/S ratio below 0.67\n"
-        "  • Negative basis\n"
-        "  • Score 75+\n\n"
+        "Alerts only on genuine crime pump setups.\n\n"
+        "*Entry method:* Support bounce with volume confirmation\n"
+        "*Stop:* Below consolidation support\n"
+        "*Targets:* Resistance + measured moves\n\n"
         "• /scan SYMBOL — Manual scan\n"
         "• /status — Scanner status\n"
         "• /snooze SYMBOL — Mute a token",
@@ -77,9 +75,9 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def fmt(r):
     if r.get("error"):
         return f"❌ *{r['symbol']}*\n{r['error']}"
-    sc = r["crime_score"]
+    sc  = r["crime_score"]
     lbl = "🚀 EXTREME" if sc>=75 else ("💎 HIGH" if sc>=65 else ("🟠 MODERATE" if sc>=50 else "🟢 CLEAN"))
-    pump_line = "🚨 *LIVE PUMP SIGNAL — ENTER LONG NOW*" if r.get("pump_signal") else "⏸ Setup forming — not live yet."
+    pump_line = "🚨 *LIVE PUMP SIGNAL — ENTER LONG NOW*" if r.get("pump_signal") else "⏸ Setup forming — entry at support."
     trade_url = f"https://www.binance.com/en/futures/{r['symbol']}"
     lines = [
         f"🔮 *{r['symbol']}* [Binance]  |  *{sc}/100 ({lbl})*", "",
@@ -105,16 +103,27 @@ def fmt(r):
     lines.append(pump_line)
     lines.append("")
     setup = r.get("long_setup")
-    if setup and sc >= 65:
+    if setup:
         def fp(v):
+            if not v: return "N/A"
             if v < 0.0001: return f"${v:.8f}"
             if v < 0.01: return f"${v:.6f}"
             return f"${v:.4f}"
+        vol_tag = "✅ Volume confirmed" if setup.get("vol_confirm") else "⚠️ Low volume — wait for confirmation"
+        dist    = setup.get("distance_from_support", 0)
+        entry_note = "🎯 Price at support — ideal entry zone" if dist <= 3 else f"⚠️ Price {dist:.1f}% above support — wait for pullback to {fp(setup['support'])}"
         lines += [
-            f"*📊 Long Setup ({setup['conf']}):*",
-            f"  Entry:  {fp(setup['entry'])}",
-            f"  Stop:   {fp(setup['stop'])} (-{setup['risk']:.1f}%)",
-            f"  T1: {fp(setup['t1'])} → 40%  |  T2: {fp(setup['t2'])} → 40%  |  T3: {fp(setup['t3'])} → 20%",
+            f"*📊 Technical Setup ({setup['conf']} confidence):*",
+            f"  {entry_note}",
+            f"  {vol_tag}", "",
+            f"  Support:    {fp(setup['support'])}",
+            f"  Resistance: {fp(setup['resistance'])}",
+            f"  Range:      {fp(setup['range_height'])}", "",
+            f"  🟢 Entry:   {fp(setup['entry'])}  ← bounce off support",
+            f"  🔴 Stop:    {fp(setup['stop'])} (-{setup['risk']:.1f}%)  ← below support floor",
+            f"  🎯 T1:      {fp(setup['t1'])} → take 40%  ← top of range",
+            f"  🎯 T2:      {fp(setup['t2'])} → take 40%  ← measured move",
+            f"  🎯 T3:      {fp(setup['t3'])} → let 20% ride  ← extended target",
             f"  R:R = 1:{setup['rr']:.1f}", ""
         ]
     lines.append(f"[Trade on Binance]({trade_url})")
@@ -224,7 +233,7 @@ async def main():
         ("status", status_cmd)
     ]:
         app.add_handler(CommandHandler(cmd, fn))
-    logger.info("Crime Watch — crime pump detector active")
+    logger.info("Crime Watch — support bounce entry active")
     async with app:
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
