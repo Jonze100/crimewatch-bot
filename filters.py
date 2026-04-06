@@ -1,53 +1,53 @@
 def is_crime_pump_setup(result):
     """
-    Returns True only if this looks like a real crime pump setup.
-    Requires ALL core conditions to be present simultaneously.
+    Strict crime pump filter.
+    Based on STO and ARIA setups — only fires when ALL conditions match.
+    Expect 3-7 alerts per day maximum.
     """
     raw = result.get("raw", {})
     sc  = result.get("crime_score", 0)
-    
-    # Must hit score threshold
-    if sc < 75 and not result.get("pump_signal"):
-        return False, "Score too low"
-
     fr  = raw.get("funding_rate")
     lsr = raw.get("ls_ratio")
     vol = raw.get("volume_24h", 0)
-    pc  = raw.get("price_change_24h", 0)
     oi  = raw.get("open_interest", 0)
+    pc  = raw.get("price_change_24h", 0)
     vm  = vol / 1_000_000 if vol else 0
     om  = oi / 1_000_000 if oi else 0
 
-    reasons = []
+    # 1. MUST: score 75+ or live pump signal
+    if sc < 75 and not result.get("pump_signal"):
+        return False, f"Score {sc} too low"
 
-    # MUST: funding neutral or negative (shorts loaded)
-    if fr is None or fr > 0.01:
-        return False, f"Funding too positive ({fr}) — longs already dominant"
+    # 2. MUST: funding neutral or negative — shorts are loading
+    if fr is None or fr > 0.008:
+        return False, f"Funding {fr} too positive — longs dominant, not a crime setup"
 
-    # MUST: L/S ratio below 0.80 (market short)
-    if lsr is None or lsr > 0.80:
-        return False, f"L/S ratio {lsr} — not heavily short enough"
+    # 3. MUST: market heavily short — squeeze fuel present
+    if lsr is None or lsr > 0.75:
+        return False, f"L/S {lsr} not short enough — need below 0.75"
 
-    # MUST: low volume (pump hasn't started)
-    if vm > 50:
-        return False, f"Volume too high (${vm:.0f}M) — pump may already be happening"
+    # 4. MUST: low volume — pump hasn't started yet
+    if vm > 30:
+        return False, f"Volume ${vm:.0f}M too high — move may already be happening"
 
-    # MUST: price not already pumping (you're early)
-    if pc > 15:
-        return False, f"Price already up {pc:.1f}% — too late"
+    # 5. MUST: price not already moving — you're still early
+    if pc > 10:
+        return False, f"Price already up {pc:.1f}% — too late to enter"
 
-    # MUST: open interest present (leveraged positions building)
-    if om < 1:
-        return False, f"OI too low (${om:.1f}M) — no leverage buildup"
+    # 6. MUST: OI present — leveraged positions building
+    if om < 2:
+        return False, f"OI ${om:.1f}M too low — no leverage buildup"
 
-    # BONUS: extra conviction signals
-    if lsr < 0.67: reasons.append("extreme shorts")
-    if fr < 0: reasons.append("negative funding")
-    if vm < 5: reasons.append("extreme low volume")
-    if result.get("pump_signal"): reasons.append("all signals aligned")
+    # 7. MUST: at least 2 of the strongest signals
+    strong_signals = 0
+    if lsr < 0.67: strong_signals += 1   # extremely short
+    if fr is not None and fr < 0: strong_signals += 1   # negative funding
+    if vm < 5: strong_signals += 1        # extreme low volume
+    if result.get("pump_signal"): strong_signals += 1   # all signals aligned
+    if om > 5 and vm < 10: strong_signals += 1          # high OI on very low volume
 
-    # Need at least 2 bonus signals for high conviction
-    if len(reasons) < 2:
-        return False, f"Only {len(reasons)} conviction signal — not enough"
+    if strong_signals < 2:
+        return False, f"Only {strong_signals} strong signal — need at least 2"
 
-    return True, f"CRIME SETUP: {', '.join(reasons)}"
+    reason = f"L/S {lsr:.2f} | Funding {fr:+.4f}% | Vol ${vm:.1f}M | OI ${om:.1f}M | Score {sc}"
+    return True, reason
