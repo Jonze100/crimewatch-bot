@@ -1,4 +1,8 @@
 def is_crime_pump_setup(result):
+    """
+    Exact fingerprint of STO, ARIA, RAVE crime pumps.
+    The key signal: HIGH OI on EXTREMELY LOW volume + shorts dominant.
+    """
     raw = result.get("raw", {})
     sc  = result.get("crime_score", 0)
     fr  = raw.get("funding_rate")
@@ -8,34 +12,40 @@ def is_crime_pump_setup(result):
     pc  = raw.get("price_change_24h", 0)
     vm  = vol / 1_000_000 if vol else 0
     om  = oi / 1_000_000 if oi else 0
-    dynamic_score = result.get("dynamic_score", 0)
 
-    if sc < 65 and not result.get("pump_signal") and dynamic_score < 20:
-        return False, f"Score {sc} too low"
+    # MUST: extremely low volume — under $5M
+    # STO: $2.7M, ARIA: $1.7M, RAVE: $2.6M
+    if vm > 5:
+        return False, f"Volume ${vm:.1f}M too high — need under $5M"
 
+    # MUST: L/S ratio below 0.75 — shorts dominant
     if lsr is None or lsr > 0.75:
         return False, f"L/S {lsr} not short enough"
 
-    # LOW VOLUME ONLY — this is key for crime pumps
-    if vm > 30:
-        return False, f"Volume ${vm:.0f}M too high"
+    # MUST: OI at least 2x volume — stealth accumulation
+    # STO: OI $6.3M on $2.7M vol = 2.3x
+    # ARIA: OI $12.6M on $1.7M vol = 7.4x
+    # RAVE: OI $9.3M on $2.6M vol = 3.6x
+    if vol > 0:
+        oi_vol_ratio = oi / vol
+        if oi_vol_ratio < 2:
+            return False, f"OI/Vol ratio {oi_vol_ratio:.1f}x too low — need 2x+"
+    else:
+        return False, "No volume data"
 
-    if pc > 15:
-        return False, f"Price already up {pc:.1f}%"
+    # MUST: price flat — pump hasn't started
+    if abs(pc) > 5:
+        return False, f"Price moved {pc:.1f}% — too late or wrong direction"
 
-    if om < 1:
-        return False, f"OI ${om:.1f}M too low"
+    # MUST: minimum OI — real positions exist
+    if om < 3:
+        return False, f"OI ${om:.1f}M too low — need $3M+"
 
-    strong = 0
-    if lsr is not None and lsr < 0.67: strong += 1
-    if fr is not None and fr < 0.005: strong += 1
-    if vm < 10: strong += 1
-    if dynamic_score >= 15: strong += 1
-    if result.get("pump_signal"): strong += 1
-    if om > 3 and vm < 15: strong += 1
+    # MUST: funding neutral or negative — not overly long
+    if fr is not None and fr > 0.02:
+        return False, f"Funding {fr:+.4f}% too positive — longs crowded"
 
-    if strong < 2:
-        return False, f"Only {strong} strong signals"
-
-    reason = f"L/S {lsr:.2f} | Fr {fr:+.4f}% | Vol ${vm:.1f}M | OI ${om:.1f}M | Score {sc}"
+    reason = (f"Vol ${vm:.1f}M | OI ${om:.1f}M | "
+              f"OI/Vol {oi/vol:.1f}x | L/S {lsr:.2f} | "
+              f"Fr {fr:+.4f}% | Score {sc}")
     return True, reason
