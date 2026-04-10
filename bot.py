@@ -2,8 +2,8 @@ import asyncio, logging, datetime, os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.request import HTTPXRequest
-from scanner import scan_token, get_binance_symbols
-from whale import scan_whale_activity
+from scanner import scan_token, discover_all_tokens
+from whale import scan_whale_activity, scan_whale_activity
 from filters import is_crime_pump_setup
 from config import BOT_TOKEN, ALERT_CHAT_IDS, SCAN_INTERVAL_MINUTES, MIN_ALERT_SCORE
 
@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 last_alerted = {}
 last_whale_alerted = set()
 snoozed = set()
-scan_stats = {"last_scan":"Never","tokens_scanned":0,"alerts_sent":0,"last_whale_scan":"Never","whale_contracts_resolved":0}
+scan_stats = {"last_scan":"Never","tokens_scanned":0,"alerts_sent":0,
+              "last_whale_scan":"Never","whale_contracts_resolved":0}
 ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY","")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -21,10 +22,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ALERT_CHAT_IDS.append(chat_id)
     await update.message.reply_text(
         "🔮 *Crime Watch*\n\n"
-        "Alerts only on genuine crime pump setups.\n\n"
-        "*Entry method:* Support bounce with volume confirmation\n"
-        "*Stop:* Below consolidation support\n"
-        "*Targets:* Resistance + measured moves\n\n"
+        "Scans Binance + Bitunix futures for crime pump setups.\n\n"
+        "*Alert criteria:*\n"
+        "  • L/S ratio below 0.75 — shorts dominant\n"
+        "  • Low volume — pump not started\n"
+        "  • OI building silently\n"
+        "  • Score 75+ or dynamic spike\n\n"
         "• /scan SYMBOL — Manual scan\n"
         "• /status — Scanner status\n"
         "• /snooze SYMBOL — Mute a token",
@@ -63,7 +66,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 *Market scanner:*\n"
         f"  • Last scan: {scan_stats['last_scan']}\n"
         f"  • Tokens scanned: {scan_stats['tokens_scanned']}\n"
-        f"  • Filter: negative funding + L/S <0.67 + negative basis\n\n"
+        f"  • Exchanges: Binance + Bitunix\n\n"
         f"🐋 *Whale scanner:*\n"
         f"  • Last scan: {scan_stats['last_whale_scan']}\n"
         f"  • Contracts resolved: {scan_stats['whale_contracts_resolved']}\n\n"
@@ -77,10 +80,13 @@ def fmt(r):
         return f"❌ *{r['symbol']}*\n{r['error']}"
     sc  = r["crime_score"]
     lbl = "🚀 EXTREME" if sc>=75 else ("💎 HIGH" if sc>=65 else ("🟠 MODERATE" if sc>=50 else "🟢 CLEAN"))
-    pump_line = "🚨 *LIVE PUMP SIGNAL — ENTER LONG NOW*" if r.get("pump_signal") else "⏸ Setup forming — entry at support."
-    trade_url = f"https://www.binance.com/en/futures/{r['symbol']}"
+    exch = r.get("exchange","?")
+    pump_line = "🚨 *LIVE PUMP SIGNAL — ENTER LONG NOW*" if r.get("pump_signal") else "⏸ Setup forming — not live yet."
+    trade_url = (f"https://www.binance.com/en/futures/{r['symbol']}"
+                 if exch == "Binance"
+                 else f"https://www.bitunix.com/futures/{r['symbol']}")
     lines = [
-        f"🔮 *{r['symbol']}* [Binance]  |  *{sc}/100 ({lbl})*", "",
+        f"🔮 *{r['symbol']}* [{exch}]  |  *{sc}/100 ({lbl})*", "",
         f"Price: {r.get('price','N/A')} ({r.get('price_change','N/A')})",
         f"24h volume: {r.get('volume_24h','N/A')}",
         f"Open interest: {r.get('open_interest','N/A')}",
@@ -103,30 +109,20 @@ def fmt(r):
     lines.append(pump_line)
     lines.append("")
     setup = r.get("long_setup")
-    if setup:
+    if setup and sc >= 65:
         def fp(v):
             if not v: return "N/A"
-            if v < 0.0001: return f"${v:.8f}"
-            if v < 0.01: return f"${v:.6f}"
+            if v<0.0001: return f"${v:.8f}"
+            if v<0.01: return f"${v:.6f}"
             return f"${v:.4f}"
-        vol_tag = "✅ Volume confirmed" if setup.get("vol_confirm") else "⚠️ Low volume — wait for confirmation"
-        dist    = setup.get("distance_from_support", 0)
-        entry_note = "🎯 Price at support — ideal entry zone" if dist <= 3 else f"⚠️ Price {dist:.1f}% above support — wait for pullback to {fp(setup['support'])}"
         lines += [
-            f"*📊 Technical Setup ({setup['conf']} confidence):*",
-            f"  {entry_note}",
-            f"  {vol_tag}", "",
-            f"  Support:    {fp(setup['support'])}",
-            f"  Resistance: {fp(setup['resistance'])}",
-            f"  Range:      {fp(setup['range_height'])}", "",
-            f"  🟢 Entry:   {fp(setup['entry'])}  ← bounce off support",
-            f"  🔴 Stop:    {fp(setup['stop'])} (-{setup['risk']:.1f}%)  ← below support floor",
-            f"  🎯 T1:      {fp(setup['t1'])} → take 40%  ← top of range",
-            f"  🎯 T2:      {fp(setup['t2'])} → take 40%  ← measured move",
-            f"  🎯 T3:      {fp(setup['t3'])} → let 20% ride  ← extended target",
+            f"*📊 Trade Setup ({setup['conf']}):*",
+            f"  Entry:  {fp(setup['entry'])}",
+            f"  Stop:   {fp(setup['stop'])} (-{setup['risk']:.1f}%)",
+            f"  T1: {fp(setup['t1'])} → 40%  |  T2: {fp(setup['t2'])} → 40%  |  T3: {fp(setup['t3'])} → 20%",
             f"  R:R = 1:{setup['rr']:.1f}", ""
         ]
-    lines.append(f"[Trade on Binance]({trade_url})")
+    lines.append(f"[Trade on {exch}]({trade_url})")
     return "\n".join(lines)
 
 def fmt_whale(alert):
@@ -140,17 +136,11 @@ def fmt_whale(alert):
     urgency="🚨 CRITICAL" if pct>=10 else ("🔴 HIGH" if pct>=5 else "🟠 NOTABLE")
     return "\n".join([
         f"🐋 *WHALE ALERT — ${symbol}* [{urgency}]","",
-        f"Large withdrawal just left Binance:",
         f"  • Amount: *{amount:,.0f} {symbol}*",
-        f"  • Supply removed: *{pct:.1f}% of circulating supply*",
+        f"  • Supply removed: *{pct:.1f}%*",
         f"  • Destination: `{short_whale}`",
         f"  • Tx: [{short_tx}]({explorer}/tx/{tx})","",
-        f"*What this means:*",
-        f"  • Less {symbol} on exchange = supply shock incoming",
-        f"  • If shorts are heavy, squeeze is primed",
-        f"  • Negative funding = entry window open","",
-        f"*Next step:* /scan {symbol}USDT",
-        f"[Trade on Binance](https://www.binance.com/en/futures/{symbol}USDT)"
+        f"*Next step:* /scan {symbol}USDT"
     ])
 
 async def send_crime_alert(app, result):
@@ -158,7 +148,8 @@ async def send_crime_alert(app, result):
     scan_stats["alerts_sent"] += 1
     for cid in ALERT_CHAT_IDS:
         try:
-            await app.bot.send_message(int(cid), text, parse_mode="Markdown", disable_web_page_preview=True)
+            await app.bot.send_message(int(cid), text, parse_mode="Markdown",
+                                       disable_web_page_preview=True)
         except Exception as e:
             logger.error(f"Alert failed {cid}: {e}")
 
@@ -166,36 +157,43 @@ async def send_whale_alert(app, alert):
     scan_stats["alerts_sent"] += 1
     for cid in ALERT_CHAT_IDS:
         try:
-            await app.bot.send_message(int(cid), fmt_whale(alert), parse_mode="Markdown", disable_web_page_preview=True)
+            await app.bot.send_message(int(cid), fmt_whale(alert),
+                                       parse_mode="Markdown", disable_web_page_preview=True)
         except Exception as e:
             logger.error(f"Whale alert failed {cid}: {e}")
 
 async def market_scan_loop(app):
-    import aiohttp
     while True:
         try:
             scan_stats["last_scan"] = datetime.datetime.now().strftime("%H:%M:%S")
-            logger.info("Market scan starting...")
-            async with aiohttp.ClientSession(
-                headers={"User-Agent":"CrimeWatch/1.0"},
-                timeout=aiohttp.ClientTimeout(total=20)
-            ) as session:
-                symbols = await get_binance_symbols(session)
-            scan_stats["tokens_scanned"] = len(symbols)
-            for symbol in symbols:
+            logger.info("Discovering all tokens...")
+            tokens = await discover_all_tokens()
+            scan_stats["tokens_scanned"] = len(tokens)
+            logger.info(f"Scanning {len(tokens)} tokens (Binance + Bitunix)...")
+            for entry in tokens:
+                source, payload = entry
+                if source == "binance":
+                    symbol = payload
+                elif source == "bitunix":
+                    symbol = payload.get("symbol","")
+                else:
+                    continue
                 if symbol in snoozed: continue
                 try:
-                    result = await scan_token(symbol)
+                    if source == "binance":
+                        result = await scan_token(symbol)
+                    else:
+                        result = await scan_token(symbol, prefetched_data=payload)
                     prev = last_alerted.get(symbol, 0)
                     is_crime, reason = is_crime_pump_setup(result)
                     if is_crime and result["crime_score"] > prev + 8:
                         await send_crime_alert(app, result)
                         last_alerted[symbol] = result["crime_score"]
-                        logger.info(f"CRIME ALERT: {symbol} — {reason}")
+                        logger.info(f"CRIME ALERT: {symbol} [{result.get('exchange')}] — {reason}")
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     logger.error(f"Scan error {symbol}: {e}")
-            logger.info("Market scan complete.")
+            logger.info("Scan complete.")
         except Exception as e:
             logger.error(f"Market cycle error: {e}")
         await asyncio.sleep(SCAN_INTERVAL_MINUTES * 60)
@@ -208,6 +206,7 @@ async def whale_scan_loop(app):
             await asyncio.sleep(60 * 60); continue
         try:
             scan_stats["last_whale_scan"] = datetime.datetime.now().strftime("%H:%M:%S")
+            from scanner import get_binance_symbols
             async with aiohttp.ClientSession(
                 headers={"User-Agent":"CrimeWatch/1.0"},
                 timeout=aiohttp.ClientTimeout(total=20)
@@ -233,7 +232,7 @@ async def main():
         ("status", status_cmd)
     ]:
         app.add_handler(CommandHandler(cmd, fn))
-    logger.info("Crime Watch — support bounce entry active")
+    logger.info("Crime Watch — Binance + Bitunix scanning active")
     async with app:
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)

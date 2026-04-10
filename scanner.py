@@ -9,6 +9,7 @@ BINANCE_ENDPOINTS = [
     "https://fapi2.binance.com",
     "https://fapi3.binance.com",
 ]
+BITUNIX = "https://fapi.bitunix.com"
 
 async def safe_get(session, url):
     try:
@@ -28,7 +29,19 @@ async def get_binance_symbols(session):
                 usdt.sort(key=lambda x: float(x.get("quoteVolume",0)), reverse=True)
                 return [t["symbol"] for t in usdt]
         except Exception as e:
-            logger.warning(f"Symbol fetch failed {base}: {e}")
+            logger.warning(f"Binance symbol fetch failed {base}: {e}")
+    return []
+
+async def get_bitunix_tickers(session):
+    try:
+        data = await safe_get(session, f"{BITUNIX}/api/v1/futures/market/tickers")
+        if not data: return []
+        items = data.get("data", [])
+        usdt = [t for t in items if t.get("symbol","").endswith("USDT")]
+        usdt.sort(key=lambda x: float(x.get("quoteVol") or 0), reverse=True)
+        return usdt
+    except Exception as e:
+        logger.warning(f"Bitunix ticker fetch failed: {e}")
     return []
 
 async def fetch_binance(session, symbol):
@@ -40,8 +53,6 @@ async def fetch_binance(session, symbol):
             oi  = await safe_get(session, f"{base}/fapi/v1/openInterest?symbol={symbol}") or {}
             ls  = await safe_get(session, f"{base}/futures/data/globalLongShortAccountRatio?symbol={symbol}&period=1h&limit=1") or []
             pm  = await safe_get(session, f"{base}/fapi/v1/premiumIndex?symbol={symbol}") or {}
-            # Get klines for better technical analysis (last 24 candles, 1h)
-            klines = await safe_get(session, f"{base}/fapi/v1/klines?symbol={symbol}&interval=1h&limit=24") or []
             price = float(ticker.get("lastPrice",0))
             vol   = float(ticker.get("quoteVolume",0))
             oi_val= float(oi.get("openInterest",0)) * price
@@ -50,28 +61,46 @@ async def fetch_binance(session, symbol):
             mp    = float(pm.get("markPrice", price))
             ip    = float(pm.get("indexPrice", price))
             basis = ((mp - ip) / ip * 100) if ip > 0 else 0
-
-            # Calculate support/resistance from klines
-            support    = min(float(k[3]) for k in klines) if klines else float(ticker.get("lowPrice", price))
-            resistance = max(float(k[2]) for k in klines) if klines else float(ticker.get("highPrice", price))
-            range_h    = resistance - support
-
-            # Volume confirmation — average volume over last 24 candles
-            avg_vol = sum(float(k[7]) for k in klines) / len(klines) if klines else vol
-
-            return {
-                "exchange":"Binance","price":price,"volume_24h":vol,
-                "open_interest":oi_val,"funding_rate":fr,"ls_ratio":lsr,
-                "basis":basis,"price_change_24h":float(ticker.get("priceChangePercent",0)),
-                "high_24h":float(ticker.get("highPrice",0)),
-                "low_24h":float(ticker.get("lowPrice",0)),
-                "support":support,"resistance":resistance,
-                "range_height":range_h,"avg_vol_1h":avg_vol,
-                "found":price>0
-            }
+            return {"exchange":"Binance","price":price,"volume_24h":vol,
+                    "open_interest":oi_val,"funding_rate":fr,"ls_ratio":lsr,"basis":basis,
+                    "price_change_24h":float(ticker.get("priceChangePercent",0)),
+                    "high_24h":float(ticker.get("highPrice",0)),
+                    "low_24h":float(ticker.get("lowPrice",0)),"found":price>0}
         except Exception as e:
             logger.warning(f"Binance error {base} {symbol}: {e}")
     return {"found":False}
+
+async def fetch_bitunix(session, ticker_data):
+    try:
+        symbol = ticker_data.get("symbol","")
+        price  = float(ticker_data.get("lastPrice") or ticker_data.get("last") or 0)
+        if not price: return {"found":False}
+        vol  = float(ticker_data.get("quoteVol") or 0)
+        hi   = float(ticker_data.get("high") or 0)
+        lo   = float(ticker_data.get("low") or 0)
+        op   = float(ticker_data.get("open") or price)
+        pc   = ((price - op) / op * 100) if op else 0
+        mp   = float(ticker_data.get("markPrice") or price)
+        basis = ((mp - price) / price * 100) if price else 0
+        fr = None
+        oi_val = 0
+        lsr = None
+        try:
+            fd = await safe_get(session, f"{BITUNIX}/api/v1/futures/market/funding_rate?symbol={symbol}")
+            if fd:
+                fd_list = fd.get("data", [])
+                if fd_list: fr = float(fd_list[0].get("fundingRate") or 0) * 100
+        except: pass
+        try:
+            oid = await safe_get(session, f"{BITUNIX}/api/v1/futures/market/open-interest?symbol={symbol}")
+            if oid:
+                oi_val = float(oid.get("data", {}).get("openInterest") or 0) * price
+        except: pass
+        return {"exchange":"Bitunix","price":price,"volume_24h":vol,
+                "open_interest":oi_val,"funding_rate":fr,"ls_ratio":lsr,"basis":basis,
+                "price_change_24h":pc,"high_24h":hi,"low_24h":lo,"found":True}
+    except Exception as e:
+        logger.warning(f"Bitunix fetch error: {e}"); return {"found":False}
 
 async def fetch_data(symbol):
     async with aiohttp.ClientSession(
@@ -80,7 +109,33 @@ async def fetch_data(symbol):
     ) as s:
         d = await fetch_binance(s, symbol)
         if d.get("found"): return d
-    return {"found":False,"error":f"{symbol} not found on Binance futures"}
+        try:
+            td = await safe_get(s, f"{BITUNIX}/api/v1/futures/market/tickers?symbols={symbol}")
+            if td:
+                items = td.get("data", [])
+                if items:
+                    d = await fetch_bitunix(s, items[0])
+                    if d.get("found"): return d
+        except: pass
+    return {"found":False,"error":f"{symbol} not found on Binance or Bitunix"}
+
+async def discover_all_tokens():
+    """Returns all tokens from Binance + Bitunix"""
+    results = []
+    async with aiohttp.ClientSession(
+        headers={"User-Agent":"CrimeWatch/1.0"},
+        timeout=aiohttp.ClientTimeout(total=20)
+    ) as session:
+        binance = await get_binance_symbols(session)
+        for sym in binance:
+            results.append(("binance", sym))
+        bitunix = await get_bitunix_tickers(session)
+        binance_set = set(binance)
+        for t in bitunix:
+            sym = t.get("symbol","")
+            if sym and sym not in binance_set:
+                results.append(("bitunix", t))
+    return results
 
 def score_static(data):
     s,flags,longs,risks,pump_conds = 0,[],[],[],[]
@@ -115,100 +170,54 @@ def score_static(data):
     if abs(bas)>0.05:
         if bas<-0.2: s+=12;flags.append(f"Basis {bas:+.3f}% — futures below spot: shorts overextended");longs.append("Negative basis = shorts overextended");pump_conds.append("neg_basis")
         elif bas>0.5: risks.append(f"Basis {bas:+.3f}% — futures premium: longs overheating")
-    if abs(pc)<2 and vm<10: s+=10;flags.append(f"Price flat {pc:+.1f}% on low volume — pump hasn't started: early entry window");longs.append("Flat price = you're early, pump hasn't happened yet");pump_conds.append("flat_price")
+    if abs(pc)<2 and vm<10: s+=10;flags.append(f"Price flat {pc:+.1f}% on low volume — pump hasn't started");longs.append("Flat price = you're early");pump_conds.append("flat_price")
     elif pc>20: risks.append(f"Price already up {pc:+.1f}% — possible late entry")
     pump=len(pump_conds)>=4
     if pump: s+=15;flags.append(f"ALL SIGNALS ALIGN ({len(pump_conds)}/7): {', '.join(pump_conds)}");longs.append("ENTER LONG NOW: all pre-pump conditions confirmed")
     return min(s,100),flags,longs,risks,pump
 
-def technical_long_setup(data, crime_score):
-    """
-    Support bounce entry with volume confirmation.
-    Enter at support, stop below support, targets at resistance and measured moves.
-    """
-    price      = data.get("price", 0)
-    support    = data.get("support", 0)
-    resistance = data.get("resistance", 0)
-    range_h    = data.get("range_height", 0)
-    avg_vol    = data.get("avg_vol_1h", 0)
-    cur_vol    = data.get("volume_24h", 0)
-    lo         = data.get("low_24h", 0)
+def simple_setup(data, crime_score):
+    p  = data.get("price", 0)
+    lo = data.get("low_24h", 0)
+    hi = data.get("high_24h", 0)
+    if not p: return None
+    stop = lo * 0.98
+    if crime_score >= 80: t1,t2,t3,conf = p*1.10,p*1.20,p*1.40,"HIGH"
+    elif crime_score >= 75: t1,t2,t3,conf = p*1.08,p*1.15,p*1.30,"MODERATE"
+    else: t1,t2,t3,conf = p*1.05,p*1.10,p*1.20,"LOW"
+    risk = ((p - stop) / p * 100) if p > stop else 0
+    rr   = (t1 - p) / (p - stop) if p > stop else 0
+    return {"entry":p,"stop":stop,"t1":t1,"t2":t2,"t3":t3,
+            "risk":risk,"rr":rr,"conf":conf}
 
-    if not price or not support or not resistance or range_h <= 0:
-        return None
-
-    # Entry: bounce off support with 0.5% buffer above support
-    entry = support * 1.005
-
-    # If price is already above entry significantly, adjust
-    # Don't chase — only enter if price is near support
-    distance_from_support = ((price - support) / support * 100) if support > 0 else 0
-    if distance_from_support > 5:
-        # Price has moved away from support — use current price as entry
-        entry = price
-
-    # Stop: 2% below support (below the consolidation floor)
-    stop = support * 0.98
-
-    # Targets based on measured move from support to resistance
-    t1 = resistance                          # top of range — take 40%
-    t2 = resistance + (range_h * 1.0)       # measured move above range — take 40%
-    t3 = resistance + (range_h * 2.0)       # extended target — let 20% ride
-
-    # Risk and R:R
-    risk_pct = ((entry - stop) / entry * 100) if entry > stop else 0
-    rr       = ((t1 - entry) / (entry - stop)) if entry > stop else 0
-
-    # Volume confirmation
-    vol_confirm = cur_vol > avg_vol * 0.8  # current volume at least 80% of average
-
-    # Confidence based on crime score and setup quality
-    if crime_score >= 80 and rr >= 2:
-        conf = "HIGH"
-    elif crime_score >= 75 and rr >= 1.5:
-        conf = "MODERATE"
+async def scan_token(symbol, prefetched_data=None):
+    if prefetched_data:
+        async with aiohttp.ClientSession(
+            headers={"User-Agent":"CrimeWatch/1.0"},
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as session:
+            data = await fetch_bitunix(session, prefetched_data)
     else:
-        conf = "LOW"
-
-    return {
-        "entry": entry,
-        "stop": stop,
-        "t1": t1,
-        "t2": t2,
-        "t3": t3,
-        "risk": risk_pct,
-        "rr": rr,
-        "conf": conf,
-        "support": support,
-        "resistance": resistance,
-        "range_height": range_h,
-        "vol_confirm": vol_confirm,
-        "distance_from_support": distance_from_support,
-    }
-
-async def scan_token(symbol):
-    data = await fetch_data(symbol)
+        data = await fetch_data(symbol)
     if not data.get("found"):
-        return {"symbol":symbol,"error":data.get("error","Could not fetch data"),"crime_score":0,"pump_signal":False,"dynamic_alert":False}
+        return {"symbol":symbol,"error":data.get("error","Could not fetch data"),
+                "crime_score":0,"pump_signal":False,"dynamic_alert":False}
     static_score,flags,longs,risks,pump = score_static(data)
     dynamic_flags,dynamic_score,is_dynamic = detect_dynamic_signals(symbol, data)
     total_score = min(static_score+dynamic_score, 100)
-    all_flags   = flags + dynamic_flags
-    setup       = technical_long_setup(data, total_score)
+    setup = simple_setup(data, total_score)
     def fm(v): return f"${v/1e6:.1f}M" if v and v>=1e6 else (f"${v/1e3:.1f}K" if v and v>=1e3 else "N/A")
     def fp(v):
         if not v: return "N/A"
         if v<0.0001: return f"${v:.8f}"
         if v<0.01: return f"${v:.6f}"
         return f"${v:.4f}"
-    return {
-        "symbol":symbol,"exchange":data.get("exchange","Binance"),
-        "price":fp(data.get("price")),"price_change":f"{data.get('price_change_24h',0):+.2f}%",
-        "volume_24h":fm(data.get("volume_24h")),"open_interest":fm(data.get("open_interest")),
-        "funding_rate":f"{data.get('funding_rate',0):+.4f}% per 8h" if data.get("funding_rate") is not None else "N/A",
-        "ls_ratio":f"{data.get('ls_ratio',0):.2f}" if data.get("ls_ratio") else "N/A",
-        "basis":f"{data.get('basis',0):+.3f}%","crime_score":total_score,
-        "static_score":static_score,"dynamic_score":dynamic_score,
-        "flags":all_flags,"long_signals":longs,"risk_signals":risks,
-        "pump_signal":pump,"dynamic_alert":is_dynamic,"long_setup":setup,"raw":data
-    }
+    return {"symbol":symbol,"exchange":data.get("exchange","?"),
+            "price":fp(data.get("price")),"price_change":f"{data.get('price_change_24h',0):+.2f}%",
+            "volume_24h":fm(data.get("volume_24h")),"open_interest":fm(data.get("open_interest")),
+            "funding_rate":f"{data.get('funding_rate',0):+.4f}% per 8h" if data.get("funding_rate") is not None else "N/A",
+            "ls_ratio":f"{data.get('ls_ratio',0):.2f}" if data.get("ls_ratio") else "N/A",
+            "basis":f"{data.get('basis',0):+.3f}%","crime_score":total_score,
+            "static_score":static_score,"dynamic_score":dynamic_score,
+            "flags":flags+dynamic_flags,"long_signals":longs,"risk_signals":risks,
+            "pump_signal":pump,"dynamic_alert":is_dynamic,"long_setup":setup,"raw":data}
