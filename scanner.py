@@ -22,26 +22,11 @@ async def safe_get(session, url):
 
 async def get_binance_symbols(session):
     for base in BINANCE_ENDPOINTS:
-        try:
-            data = await safe_get(session, f"{base}/fapi/v1/ticker/24hr")
-            if data and isinstance(data, list):
-                usdt = [t for t in data if t.get("symbol","").endswith("USDT")]
-                usdt.sort(key=lambda x: float(x.get("quoteVolume",0)), reverse=True)
-                return [t["symbol"] for t in usdt]
-        except Exception as e:
-            logger.warning(f"Binance symbol fetch failed {base}: {e}")
-    return []
-
-async def get_bitunix_tickers(session):
-    try:
-        data = await safe_get(session, f"{BITUNIX}/api/v1/futures/market/tickers")
-        if not data: return []
-        items = data.get("data", [])
-        usdt = [t for t in items if t.get("symbol","").endswith("USDT")]
-        usdt.sort(key=lambda x: float(x.get("quoteVol") or 0), reverse=True)
-        return usdt
-    except Exception as e:
-        logger.warning(f"Bitunix ticker fetch failed: {e}")
+        data = await safe_get(session, f"{base}/fapi/v1/ticker/24hr")
+        if data and isinstance(data, list):
+            usdt = [t for t in data if t.get("symbol","").endswith("USDT")]
+            usdt.sort(key=lambda x: float(x.get("quoteVolume",0)), reverse=True)
+            return [t["symbol"] for t in usdt]
     return []
 
 async def fetch_binance(session, symbol):
@@ -49,10 +34,10 @@ async def fetch_binance(session, symbol):
         try:
             ticker = await safe_get(session, f"{base}/fapi/v1/ticker/24hr?symbol={symbol}")
             if not ticker or float(ticker.get("lastPrice",0)) == 0: continue
-            fd  = await safe_get(session, f"{base}/fapi/v1/fundingRate?symbol={symbol}&limit=1") or []
-            oi  = await safe_get(session, f"{base}/fapi/v1/openInterest?symbol={symbol}") or {}
-            ls  = await safe_get(session, f"{base}/futures/data/globalLongShortAccountRatio?symbol={symbol}&period=1h&limit=1") or []
-            pm  = await safe_get(session, f"{base}/fapi/v1/premiumIndex?symbol={symbol}") or {}
+            fd = await safe_get(session, f"{base}/fapi/v1/fundingRate?symbol={symbol}&limit=1") or []
+            oi = await safe_get(session, f"{base}/fapi/v1/openInterest?symbol={symbol}") or {}
+            ls = await safe_get(session, f"{base}/futures/data/globalLongShortAccountRatio?symbol={symbol}&period=1h&limit=1") or []
+            pm = await safe_get(session, f"{base}/fapi/v1/premiumIndex?symbol={symbol}") or {}
             price = float(ticker.get("lastPrice",0))
             vol   = float(ticker.get("quoteVolume",0))
             oi_val= float(oi.get("openInterest",0)) * price
@@ -65,42 +50,44 @@ async def fetch_binance(session, symbol):
                     "open_interest":oi_val,"funding_rate":fr,"ls_ratio":lsr,"basis":basis,
                     "price_change_24h":float(ticker.get("priceChangePercent",0)),
                     "high_24h":float(ticker.get("highPrice",0)),
-                    "low_24h":float(ticker.get("lowPrice",0)),"found":price>0}
+                    "low_24h":float(ticker.get("lowPrice",0)),"found":True}
         except Exception as e:
             logger.warning(f"Binance error {base} {symbol}: {e}")
     return {"found":False}
 
-async def fetch_bitunix(session, ticker_data):
+async def fetch_bitunix(session, symbol):
     try:
-        symbol = ticker_data.get("symbol","")
-        price  = float(ticker_data.get("lastPrice") or ticker_data.get("last") or 0)
+        td = await safe_get(session, f"{BITUNIX}/api/v1/futures/market/tickers?symbols={symbol}")
+        if not td: return {"found":False}
+        items = td.get("data", [])
+        if not items: return {"found":False}
+        t = items[0]
+        price = float(t.get("lastPrice") or t.get("last") or 0)
         if not price: return {"found":False}
-        vol  = float(ticker_data.get("quoteVol") or 0)
-        hi   = float(ticker_data.get("high") or 0)
-        lo   = float(ticker_data.get("low") or 0)
-        op   = float(ticker_data.get("open") or price)
+        vol  = float(t.get("quoteVol") or 0)
+        hi   = float(t.get("high") or 0)
+        lo   = float(t.get("low") or 0)
+        op   = float(t.get("open") or price)
         pc   = ((price - op) / op * 100) if op else 0
-        mp   = float(ticker_data.get("markPrice") or price)
+        mp   = float(t.get("markPrice") or price)
         basis = ((mp - price) / price * 100) if price else 0
-        fr = None
-        oi_val = 0
-        lsr = None
+        fr, oi_val = None, 0
         try:
             fd = await safe_get(session, f"{BITUNIX}/api/v1/futures/market/funding_rate?symbol={symbol}")
             if fd:
-                fd_list = fd.get("data", [])
-                if fd_list: fr = float(fd_list[0].get("fundingRate") or 0) * 100
+                fdl = fd.get("data", [])
+                if fdl: fr = float(fdl[0].get("fundingRate") or 0) * 100
         except: pass
         try:
             oid = await safe_get(session, f"{BITUNIX}/api/v1/futures/market/open-interest?symbol={symbol}")
-            if oid:
-                oi_val = float(oid.get("data", {}).get("openInterest") or 0) * price
+            if oid: oi_val = float(oid.get("data", {}).get("openInterest") or 0) * price
         except: pass
         return {"exchange":"Bitunix","price":price,"volume_24h":vol,
-                "open_interest":oi_val,"funding_rate":fr,"ls_ratio":lsr,"basis":basis,
+                "open_interest":oi_val,"funding_rate":fr,"ls_ratio":None,"basis":basis,
                 "price_change_24h":pc,"high_24h":hi,"low_24h":lo,"found":True}
     except Exception as e:
-        logger.warning(f"Bitunix fetch error: {e}"); return {"found":False}
+        logger.warning(f"Bitunix error {symbol}: {e}")
+    return {"found":False}
 
 async def fetch_data(symbol):
     async with aiohttp.ClientSession(
@@ -109,33 +96,9 @@ async def fetch_data(symbol):
     ) as s:
         d = await fetch_binance(s, symbol)
         if d.get("found"): return d
-        try:
-            td = await safe_get(s, f"{BITUNIX}/api/v1/futures/market/tickers?symbols={symbol}")
-            if td:
-                items = td.get("data", [])
-                if items:
-                    d = await fetch_bitunix(s, items[0])
-                    if d.get("found"): return d
-        except: pass
+        d = await fetch_bitunix(s, symbol)
+        if d.get("found"): return d
     return {"found":False,"error":f"{symbol} not found on Binance or Bitunix"}
-
-async def discover_all_tokens():
-    """Returns all tokens from Binance + Bitunix"""
-    results = []
-    async with aiohttp.ClientSession(
-        headers={"User-Agent":"CrimeWatch/1.0"},
-        timeout=aiohttp.ClientTimeout(total=20)
-    ) as session:
-        binance = await get_binance_symbols(session)
-        for sym in binance:
-            results.append(("binance", sym))
-        bitunix = await get_bitunix_tickers(session)
-        binance_set = set(binance)
-        for t in bitunix:
-            sym = t.get("symbol","")
-            if sym and sym not in binance_set:
-                results.append(("bitunix", t))
-    return results
 
 def score_static(data):
     s,flags,longs,risks,pump_conds = 0,[],[],[],[]
@@ -156,11 +119,11 @@ def score_static(data):
         elif lsr>1.8: risks.append(f"L/S ratio {lsr:.2f} — crowded longs: dump risk")
     if vol>0 and oi>0:
         ratio=oi/vol
-        if ratio>3: s+=20;flags.append(f"Thin order book: OI ${om:.1f}M vs vol ${vm:.1f}M");longs.append("High OI on low volume = smart money positioning quietly");pump_conds.append("high_oi_low_vol")
+        if ratio>3: s+=20;flags.append(f"Thin order book: OI ${om:.1f}M vs vol ${vm:.1f}M — small capital moves price significantly");longs.append("High OI on low volume = smart money positioning quietly");pump_conds.append("high_oi_low_vol")
         elif ratio>2: s+=15;flags.append(f"OI/Volume {ratio:.1f}x — stealth accumulation");longs.append("OI growing while volume stays low");pump_conds.append("oi_building")
         elif ratio>1: s+=8;flags.append(f"OI/Volume {ratio:.1f}x — moderate accumulation")
     if vm>0:
-        if vm<3: s+=20;flags.append(f"Low volume coiling: ${vm:.1f}M — extreme dormancy, pre-pump pattern");longs.append("Extreme dormancy = compressed spring");pump_conds.append("extreme_dormancy")
+        if vm<3: s+=20;flags.append(f"Low volume coiling: ${vm:.1f}M — extreme dormancy, classic pre-pump dormancy pattern");longs.append("Extreme dormancy = compressed spring");pump_conds.append("extreme_dormancy")
         elif vm<10: s+=15;flags.append(f"Low volume coiling: ${vm:.1f}M — classic pre-pump dormancy");longs.append("Low volume + flat price = you're early");pump_conds.append("low_vol_coil")
         elif vm<30: s+=8;flags.append(f"Below average volume ${vm:.1f}M")
     if hi>0 and lo>0:
@@ -176,36 +139,14 @@ def score_static(data):
     if pump: s+=15;flags.append(f"ALL SIGNALS ALIGN ({len(pump_conds)}/7): {', '.join(pump_conds)}");longs.append("ENTER LONG NOW: all pre-pump conditions confirmed")
     return min(s,100),flags,longs,risks,pump
 
-def simple_setup(data, crime_score):
-    p  = data.get("price", 0)
-    lo = data.get("low_24h", 0)
-    hi = data.get("high_24h", 0)
-    if not p: return None
-    stop = lo * 0.98
-    if crime_score >= 80: t1,t2,t3,conf = p*1.10,p*1.20,p*1.40,"HIGH"
-    elif crime_score >= 75: t1,t2,t3,conf = p*1.08,p*1.15,p*1.30,"MODERATE"
-    else: t1,t2,t3,conf = p*1.05,p*1.10,p*1.20,"LOW"
-    risk = ((p - stop) / p * 100) if p > stop else 0
-    rr   = (t1 - p) / (p - stop) if p > stop else 0
-    return {"entry":p,"stop":stop,"t1":t1,"t2":t2,"t3":t3,
-            "risk":risk,"rr":rr,"conf":conf}
-
-async def scan_token(symbol, prefetched_data=None):
-    if prefetched_data:
-        async with aiohttp.ClientSession(
-            headers={"User-Agent":"CrimeWatch/1.0"},
-            timeout=aiohttp.ClientTimeout(total=15)
-        ) as session:
-            data = await fetch_bitunix(session, prefetched_data)
-    else:
-        data = await fetch_data(symbol)
+async def scan_token(symbol):
+    data = await fetch_data(symbol)
     if not data.get("found"):
         return {"symbol":symbol,"error":data.get("error","Could not fetch data"),
                 "crime_score":0,"pump_signal":False,"dynamic_alert":False}
     static_score,flags,longs,risks,pump = score_static(data)
     dynamic_flags,dynamic_score,is_dynamic = detect_dynamic_signals(symbol, data)
     total_score = min(static_score+dynamic_score, 100)
-    setup = simple_setup(data, total_score)
     def fm(v): return f"${v/1e6:.1f}M" if v and v>=1e6 else (f"${v/1e3:.1f}K" if v and v>=1e3 else "N/A")
     def fp(v):
         if not v: return "N/A"
@@ -220,4 +161,4 @@ async def scan_token(symbol, prefetched_data=None):
             "basis":f"{data.get('basis',0):+.3f}%","crime_score":total_score,
             "static_score":static_score,"dynamic_score":dynamic_score,
             "flags":flags+dynamic_flags,"long_signals":longs,"risk_signals":risks,
-            "pump_signal":pump,"dynamic_alert":is_dynamic,"long_setup":setup,"raw":data}
+            "pump_signal":pump,"dynamic_alert":is_dynamic,"raw":data}
