@@ -139,26 +139,32 @@ def score_static(data):
     if pump: s+=15;flags.append(f"ALL SIGNALS ALIGN ({len(pump_conds)}/7): {', '.join(pump_conds)}");longs.append("ENTER LONG NOW: all pre-pump conditions confirmed")
     return min(s,100),flags,longs,risks,pump
 
-async def scan_token(symbol):
-    data = await fetch_data(symbol)
-    if not data.get("found"):
-        return {"symbol":symbol,"error":data.get("error","Could not fetch data"),
-                "crime_score":0,"pump_signal":False,"dynamic_alert":False}
-    static_score,flags,longs,risks,pump = score_static(data)
-    dynamic_flags,dynamic_score,is_dynamic = detect_dynamic_signals(symbol, data)
-    total_score = min(static_score+dynamic_score, 100)
-    def fm(v): return f"${v/1e6:.1f}M" if v and v>=1e6 else (f"${v/1e3:.1f}K" if v and v>=1e3 else "N/A")
-    def fp(v):
-        if not v: return "N/A"
-        if v<0.0001: return f"${v:.8f}"
-        if v<0.01: return f"${v:.6f}"
-        return f"${v:.4f}"
-    return {"symbol":symbol,"exchange":data.get("exchange","?"),
-            "price":fp(data.get("price")),"price_change":f"{data.get('price_change_24h',0):+.2f}%",
-            "volume_24h":fm(data.get("volume_24h")),"open_interest":fm(data.get("open_interest")),
-            "funding_rate":f"{data.get('funding_rate',0):+.4f}% per 8h" if data.get("funding_rate") is not None else "N/A",
-            "ls_ratio":f"{data.get('ls_ratio',0):.2f}" if data.get("ls_ratio") else "N/A",
-            "basis":f"{data.get('basis',0):+.3f}%","crime_score":total_score,
-            "static_score":static_score,"dynamic_score":dynamic_score,
-            "flags":flags+dynamic_flags,"long_signals":longs,"risk_signals":risks,
-            "pump_signal":pump,"dynamic_alert":is_dynamic,"raw":data}
+async def scan_token(symbol: str):
+    """Fixed scanner with Binance → Bitunix fallback"""
+    symbol = symbol.upper().strip()
+    
+    # Auto-add USDT if user typed short symbol
+    if not symbol.endswith("USDT"):
+        symbol += "USDT"
+
+    print(f"[Scanner] Trying Binance Futures for {symbol}")
+
+    # Try Binance first
+    result = await binance_scanner.scan(symbol)   # or whatever the Binance function is called
+    if result and result.get("success") is True:
+        result["source"] = "Binance Futures"
+        return result
+
+    # Fallback to Bitunix
+    print(f"[Scanner] Binance failed for {symbol} → falling back to Bitunix")
+    result = await bitunix_scanner.scan(symbol)   # or whatever the Bitunix function is called
+
+    if result and result.get("success") is True:
+        result["source"] = "Bitunix (fallback)"
+        return result
+
+    # Both failed
+    return {
+        "success": False,
+        "message": f"Token {symbol} not found on Binance Futures or Bitunix"
+    }
