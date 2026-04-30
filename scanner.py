@@ -140,31 +140,64 @@ def score_static(data):
     return min(s,100),flags,longs,risks,pump
 
 async def scan_token(symbol: str):
-    """Fixed scanner with Binance → Bitunix fallback"""
     symbol = symbol.upper().strip()
-    
-    # Auto-add USDT if user typed short symbol
     if not symbol.endswith("USDT"):
         symbol += "USDT"
 
-    print(f"[Scanner] Trying Binance Futures for {symbol}")
+    data = await fetch_data(symbol)
+    if not data.get("found"):
+        return {"error": data.get("error", f"{symbol} not found"), "symbol": symbol}
 
-    # Try Binance first
-    result = await binance_scanner.scan(symbol)   # or whatever the Binance function is called
-    if result and result.get("success") is True:
-        result["source"] = "Binance Futures"
-        return result
+    # score_static and detect_dynamic_signals both read from the raw data dict
+    static_score, flags, long_signals, risk_signals, pump = score_static(data)
+    dyn_flags, dyn_score, is_dynamic = detect_dynamic_signals(symbol, data)
 
-    # Fallback to Bitunix
-    print(f"[Scanner] Binance failed for {symbol} → falling back to Bitunix")
-    result = await bitunix_scanner.scan(symbol)   # or whatever the Bitunix function is called
+    all_flags  = flags + dyn_flags
+    crime_score = min(static_score + dyn_score, 100)
 
-    if result and result.get("success") is True:
-        result["source"] = "Bitunix (fallback)"
-        return result
+    price = data.get("price", 0)
+    vol   = data.get("volume_24h", 0)
+    oi    = data.get("open_interest", 0)
+    fr    = data.get("funding_rate")
+    lsr   = data.get("ls_ratio")
+    basis = data.get("basis", 0)
+    pc    = data.get("price_change_24h", 0)
+    vm    = vol / 1_000_000 if vol else 0
+    om    = oi  / 1_000_000 if oi  else 0
 
-    # Both failed
+    if price <= 0:
+        price_str = "N/A"
+    elif price >= 1:
+        price_str = f"${price:.4f}"
+    elif price >= 0.01:
+        price_str = f"${price:.6f}"
+    else:
+        price_str = f"${price:.8f}"
+
     return {
-        "success": False,
-        "message": f"Token {symbol} not found on Binance Futures or Bitunix"
+        "symbol":        symbol,
+        "exchange":      data.get("exchange", "Unknown"),
+        "price":         price_str,
+        "price_change":  f"{pc:+.2f}%",
+        "volume_24h":    f"${vm:.2f}M",
+        "open_interest": f"${om:.2f}M",
+        "funding_rate":  f"{fr:+.4f}%" if fr is not None else "N/A",
+        "ls_ratio":      f"{lsr:.2f}"  if lsr is not None else "N/A",
+        "basis":         f"{basis:+.3f}%",
+        "crime_score":   crime_score,
+        "static_score":  static_score,
+        "dynamic_score": dyn_score,
+        "flags":         all_flags,
+        "long_signals":  long_signals,
+        "risk_signals":  risk_signals,
+        "pump_signal":   pump,
+        "dynamic_alert": is_dynamic,
+        "raw": {
+            "funding_rate":     fr,
+            "ls_ratio":         lsr,
+            "volume_24h":       vol,
+            "open_interest":    oi,
+            "price_change_24h": pc,
+            "price":            price,
+        }
     }

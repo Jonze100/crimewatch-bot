@@ -20,14 +20,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔮 *Crime Watch*\n\n"
         "Detects crime pump setups before they happen.\n\n"
-        "*Exact criteria (STO/ARIA/RAVE pattern):*\n"
-        "  • Volume under $5M — nobody watching\n"
-        "  • OI at least 2x volume — stealth buildup\n"
-        "  • L/S below 0.75 — shorts dominant\n"
-        "  • Price flat — pump not started\n\n"
+        "*Filter criteria (STO/ARIA/RAVE pattern):*\n"
+        "  • Volume ≤ $8M — nobody watching\n"
+        "  • OI ≥ 2.5x volume — stealth buildup\n"
+        "  • OI ≥ $3M — real money involved\n"
+        "  • L/S ≤ 0.75 — shorts dominant\n"
+        "  • Price flat ≤ ±5% — pump not started\n"
+        "  • Funding ≤ +0.015% — no long crowding yet\n\n"
+        "✅ *CONFIRMED* — L/S < 0.67, funding negative, vol < $3M\n"
+        "⚠️ *POTENTIAL* — passes all filters, less extreme\n\n"
         "• /scan SYMBOL — Manual scan\n"
         "• /status — Bot status\n"
-        "• /snooze SYMBOL — Mute a token",
+        "• /snooze SYMBOL — Mute a token\n"
+        "• /unsnooze SYMBOL — Unmute a token",
         parse_mode="Markdown"
     )
 
@@ -39,6 +44,9 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not symbol.endswith("USDT"): symbol += "USDT"
     msg = await update.message.reply_text(f"🔍 Scanning *{symbol}*...", parse_mode="Markdown")
     result = await scan_token(symbol)
+    if not result.get("error"):
+        _, _, label = is_crime_pump_setup(result)
+        result["label"] = label
     await msg.edit_text(fmt(result), parse_mode="Markdown", disable_web_page_preview=True)
 
 async def snooze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -63,7 +71,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  • Last scan: {scan_stats['last_scan']}\n"
         f"  • Tokens scanned: {scan_stats['tokens_scanned']}\n"
         f"  • Alerts sent: {scan_stats['alerts_sent']}\n"
-        f"  • Filter: Vol <$5M + OI/Vol 2x+ + L/S <0.75\n"
+        f"  • Filter: Vol ≤$8M | OI/Vol ≥2.5x | L/S ≤0.75 | OI ≥$3M\n"
+        f"  • Min score: {MIN_ALERT_SCORE} | Fires on dynamic signal or score ≥90\n"
         f"  • Your chat ID: `{update.effective_chat.id}`",
         parse_mode="Markdown"
     )
@@ -71,29 +80,57 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def fmt(r):
     if r.get("error"):
         return f"❌ *{r['symbol']}*\n{r['error']}"
-    sc  = r["crime_score"]
-    lbl = "🚀 EXTREME" if sc>=75 else ("💎 HIGH" if sc>=65 else ("🟠 MODERATE" if sc>=50 else "🟢 CLEAN"))
-    pump_line = "🚨 *LIVE PUMP SIGNAL — ENTER LONG NOW*" if r.get("pump_signal") else "⏸ Setup forming — not live yet."
+
+    sc       = r["crime_score"]
+    stat_sc  = r.get("static_score", sc)
+    dyn_sc   = r.get("dynamic_score", 0)
+    lbl      = ("🚀 EXTREME" if sc >= 75 else
+                "💎 HIGH"    if sc >= 65 else
+                "🟠 MODERATE" if sc >= 50 else
+                "🟢 CLEAN")
+
+    setup_label = r.get("label", "")
+    if setup_label == "CONFIRMED":
+        label_str = " | ✅ *CONFIRMED*"
+    elif setup_label == "POTENTIAL":
+        label_str = " | ⚠️ *POTENTIAL*"
+    else:
+        label_str = ""
+
+    pump_line = ("🚨 *LIVE PUMP SIGNAL — ENTER LONG NOW*"
+                 if r.get("pump_signal") else
+                 "⏸ Setup forming — not live yet.")
     trade_url = f"https://www.bitunix.com/futures/{r['symbol']}"
-    import datetime as dt
-    time_now = dt.datetime.utcnow().strftime("%H:%M UTC")
-    lines = [
-        f"🔮 *{r['symbol']}* Binance  |  *{sc}/100 ({lbl})*", "",
-        f"Price:          {r.get('price','N/A')}",
+    time_now  = datetime.datetime.utcnow().strftime("%H:%M UTC")
+
+    lines = [f"🔮 *{r['symbol']}* {r.get('exchange','Binance')}  |  *{sc}/100 ({lbl})*{label_str}"]
+    if dyn_sc > 0:
+        lines.append(f"_Score: Static {stat_sc} + Dynamic +{dyn_sc}_")
+    lines += [
+        "",
+        f"Price:          {r.get('price','N/A')}  ({r.get('price_change','N/A')})",
         f"24h volume:     {r.get('volume_24h','N/A')}",
         f"Open interest:  {r.get('open_interest','N/A')}",
         f"Funding rate:   {r.get('funding_rate','N/A')}",
         f"L/S ratio:      {r.get('ls_ratio','N/A')}",
         f"Basis:          {r.get('basis','N/A')}",
-        f"Time:           {time_now}", ""
+        f"Time:           {time_now}",
+        ""
     ]
     if r.get("flags"):
         lines.append("*Why flagged:*")
-        [lines.append(f"  • {f}") for f in r["flags"]]
+        for f in r["flags"]:
+            lines.append(f"  • {f}")
         lines.append("")
     if r.get("long_signals"):
         lines.append("*📈 Why long:*")
-        [lines.append(f"  ✅ {s}") for s in r["long_signals"]]
+        for s in r["long_signals"]:
+            lines.append(f"  ✅ {s}")
+        lines.append("")
+    if r.get("risk_signals"):
+        lines.append("*⚠️ Risks:*")
+        for s in r["risk_signals"]:
+            lines.append(f"  ⚠️ {s}")
         lines.append("")
     lines.append(pump_line)
     lines.append("")
@@ -101,7 +138,10 @@ def fmt(r):
     return "\n".join(lines)
 
 async def send_crime_alert(app, result):
-    text = f"🚨 *CRIME PUMP SETUP DETECTED — {result['symbol']}*\n\n" + fmt(result)
+    label  = result.get("label", "SETUP")
+    header = ("✅ CONFIRMED CRIME PUMP" if label == "CONFIRMED"
+              else "⚠️ POTENTIAL CRIME PUMP")
+    text = f"🚨 *{header} — {result['symbol']}*\n\n" + fmt(result)
     scan_stats["alerts_sent"] += 1
     for cid in ALERT_CHAT_IDS:
         try:
@@ -125,12 +165,18 @@ async def market_scan_loop(app):
                 if symbol in snoozed: continue
                 try:
                     result = await scan_token(symbol)
+                    if result.get("error"):
+                        continue
                     prev = last_alerted.get(symbol, 0)
-                    is_crime, reason = is_crime_pump_setup(result)
-                    if is_crime and result["crime_score"] > prev + 8:
+                    is_crime, reason, label = is_crime_pump_setup(result)
+                    result["label"] = label
+                    if (is_crime
+                            and result["crime_score"] >= MIN_ALERT_SCORE
+                            and (result.get("dynamic_alert") or result["crime_score"] >= 90)
+                            and result["crime_score"] > prev + 8):
                         await send_crime_alert(app, result)
                         last_alerted[symbol] = result["crime_score"]
-                        logger.info(f"ALERT: {symbol} — {reason}")
+                        logger.info(f"ALERT: {symbol} [{label}] score={result['crime_score']} — {reason}")
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     logger.error(f"Scan error {symbol}: {e}")
