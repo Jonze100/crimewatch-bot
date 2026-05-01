@@ -139,7 +139,7 @@ def score_static(data):
     if pump: s+=15;flags.append(f"ALL SIGNALS ALIGN ({len(pump_conds)}/7): {', '.join(pump_conds)}");longs.append("ENTER LONG NOW: all pre-pump conditions confirmed")
     return min(s,100),flags,longs,risks,pump
 
-def score_trend(data):
+def score_trend(data, dynamic_score=0):
     s, signals = 0, []
     fr  = data.get("funding_rate")
     lsr = data.get("ls_ratio")
@@ -148,38 +148,55 @@ def score_trend(data):
     pc  = data.get("price_change_24h", 0)
     bas = data.get("basis", 0)
     vm  = vol / 1_000_000 if vol else 0
-    om  = oi  / 1_000_000 if oi  else 0
 
-    # Funding between +0.005% and +0.03% — longs in control but not yet crowded
-    if fr is not None and 0.005 <= fr <= 0.03:
+    # Track each condition for the all-signals bonus
+    fr_hit      = fr is not None and 0.005 <= fr <= 0.025
+    lsr_hit     = lsr is not None and lsr >= 1.35
+    pc_prime    = 3.0 <= pc <= 7.0   # early trend, maximum room to run
+    pc_ok       = 7.0 < pc <= 10.0   # still trending, less ideal
+    vol_hit     = vm >= 15
+    oi_vol_hit  = vol > 0 and oi > 0 and (oi / vol) >= 2.0
+    bas_hit     = 0.05 <= bas <= 0.4
+    dyn_hit     = dynamic_score >= 15
+
+    if fr_hit:
+        s += 25
+        signals.append(f"Funding {fr:+.4f}% — longs in control, optimal zone")
+
+    if lsr_hit:
+        s += 25
+        signals.append(f"L/S ratio {lsr:.2f} — strong long dominance")
+
+    if pc_prime:
+        s += 25
+        signals.append(f"Price +{pc:.1f}% — early trend, maximum room to run")
+    elif pc_ok:
+        s += 10
+        signals.append(f"Price +{pc:.1f}% — trending, some room remaining")
+
+    if vol_hit:
         s += 20
-        signals.append(f"Funding {fr:+.4f}% — longs in control, not yet crowded")
-
-    # L/S ratio above 1.2 — clear long dominance
-    if lsr is not None and lsr > 1.2:
-        s += 20
-        signals.append(f"L/S ratio {lsr:.2f} — longs dominant, bulls in charge")
-
-    # Price up between +2% and +15% — trending without being overbought
-    if 2 <= pc <= 15:
-        s += 20
-        signals.append(f"Price +{pc:.1f}% — trending up, not yet overbought")
-
-    # Volume above $10M — real buyer conviction
-    if vm >= 10:
-        s += 15
         signals.append(f"Volume ${vm:.1f}M — strong buyer conviction behind the move")
 
-    # OI/Volume above 1.5x — accumulation with real positions
-    if vol > 0 and oi > 0 and (oi / vol) > 1.5:
+    if oi_vol_hit:
         ratio = oi / vol
-        s += 15
-        signals.append(f"OI/Volume {ratio:.1f}x — real position accumulation behind the trend")
+        s += 20
+        signals.append(f"OI/Volume {ratio:.1f}x — real accumulation behind the move")
 
-    # Basis positive but under 0.5% — healthy futures premium without overheating
-    if 0 < bas < 0.5:
-        s += 10
+    if bas_hit:
+        s += 15
         signals.append(f"Basis {bas:+.3f}% — healthy futures premium, bullish conviction")
+
+    if dyn_hit:
+        s += 25
+        signals.append(f"Dynamic score {dynamic_score} — momentum building right now")
+
+    # Bonus when every signal group fires simultaneously
+    all_firing = (fr_hit and lsr_hit and (pc_prime or pc_ok)
+                  and vol_hit and oi_vol_hit and bas_hit and dyn_hit)
+    if all_firing:
+        s += 20
+        signals.append("ALL SIGNALS ALIGNED — maximum conviction setup")
 
     return min(s, 100), signals
 
@@ -199,8 +216,8 @@ async def scan_token(symbol: str):
     all_flags   = flags + dyn_flags
     crime_score = min(static_score + dyn_score, 100)
 
-    # trend scoring runs on the same raw data dict
-    trend_score, trend_signals = score_trend(data)
+    # trend scoring uses the same raw data plus the already-computed dynamic score
+    trend_score, trend_signals = score_trend(data, dyn_score)
 
     price = data.get("price", 0)
     vol   = data.get("volume_24h", 0)

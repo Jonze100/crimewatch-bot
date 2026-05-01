@@ -1,4 +1,4 @@
-import asyncio, logging, datetime, os
+import asyncio, logging, datetime, time, os
 import aiohttp
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -10,9 +10,11 @@ from config import BOT_TOKEN, ALERT_CHAT_IDS, SCAN_INTERVAL_MINUTES, MIN_ALERT_S
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 last_alerted       = {}   # symbol → last crime_score that triggered an alert
-last_trend_alerted = {}   # symbol → last trend_score that triggered an alert
+last_trend_alerted = {}   # symbol → unix timestamp of last trend alert (4h cooldown)
 snoozed = set()
 scan_stats = {"last_scan":"Never","tokens_scanned":0,"alerts_sent":0}
+
+TREND_COOLDOWN_SECONDS = 4 * 3600   # 4 hours between trend alerts per symbol
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
@@ -30,13 +32,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  • Funding ≤ +0.015% — no long crowding yet\n\n"
         "  ✅ *CONFIRMED* — L/S < 0.67, funding negative, vol < $3M\n"
         "  ⚠️ *POTENTIAL* — passes all filters, less extreme\n\n"
-        "*📈 TREND SETUP:*\n"
-        "  • Funding 0–+0.03% — longs in control\n"
-        "  • L/S > 1.1 — long dominant\n"
-        "  • Price +1% to +20% — trending\n"
-        "  • Volume > $5M — buyer conviction\n"
-        "  • OI > $3M — real positions\n"
-        "  • Trend score ≥ 70\n\n"
+        "*📈 TREND SETUP (top 3 per cycle only):*\n"
+        "  • Funding 0.005–0.025% — longs in control\n"
+        "  • L/S ≥ 1.35 — strong long dominance\n"
+        "  • Price +3% to +7% — early trend only\n"
+        "  • Volume ≥ $15M — real conviction\n"
+        "  • OI ≥ $6M — real positions\n"
+        "  • Dynamic score ≥ 15 — momentum now\n"
+        "  • Trend score ≥ 88 — max conviction only\n"
+        "  • 4-hour cooldown per token\n\n"
         "• /scan SYMBOL — Manual scan\n"
         "• /status — Bot status\n"
         "• /snooze SYMBOL — Mute a token\n"
@@ -81,8 +85,9 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  • Alerts sent: {scan_stats['alerts_sent']}\n\n"
         f"*Crime pump:* Vol ≤$8M | OI/Vol ≥2.5x | L/S ≤0.75 | OI ≥$3M\n"
         f"  Min score: {MIN_ALERT_SCORE} | Fires on dynamic signal or score ≥90\n\n"
-        f"*Trend setup:* Funding 0–+0.03% | L/S >1.1 | Price +1–20% | OI >$3M\n"
-        f"  Min trend score: 70\n\n"
+        f"*Trend setup:* Funding 0.005–0.025% | L/S ≥1.35 | Price +3–7%\n"
+        f"  Vol ≥$15M | OI ≥$6M | Dynamic ≥15 | Score ≥88\n"
+        f"  Top 3 per cycle | 4h cooldown per token\n\n"
         f"  • Your chat ID: `{update.effective_chat.id}`",
         parse_mode="Markdown"
     )
@@ -149,11 +154,12 @@ def fmt(r):
 
 def fmt_trend(r):
     ts        = r.get("trend_score", 0)
+    dyn_sc    = r.get("dynamic_score", 0)
     trade_url = f"https://www.bitunix.com/futures/{r['symbol']}"
     time_now  = datetime.datetime.utcnow().strftime("%H:%M UTC")
 
     lines = [
-        f"🔮 *{r['symbol']}* {r.get('exchange','Binance')}  |  *{ts}/100*",
+        f"🔮 *{r['symbol']}* {r.get('exchange','Binance')}  |  *{ts}/100*  |  Dynamic +{dyn_sc}",
         "",
         f"Price:          {r.get('price','N/A')}  ({r.get('price_change','N/A')})",
         f"24h volume:     {r.get('volume_24h','N/A')}",
@@ -187,8 +193,9 @@ async def send_crime_alert(app, result):
         except Exception as e:
             logger.error(f"Crime alert failed {cid}: {e}")
 
-async def send_trend_alert(app, result):
-    text = f"📈 *TREND SETUP — {result['symbol']}*\n\n" + fmt_trend(result)
+async def send_trend_alert(app, result, rank, total):
+    text = (f"📈 *TREND SETUP — {result['symbol']}* (#{rank} of {total} this cycle)\n\n"
+            + fmt_trend(result))
     scan_stats["alerts_sent"] += 1
     for cid in ALERT_CHAT_IDS:
         try:
@@ -208,6 +215,9 @@ async def market_scan_loop(app):
             ) as session:
                 symbols = await get_binance_symbols(session)
             scan_stats["tokens_scanned"] = len(symbols)
+
+            trend_candidates = []   # (trend_score, symbol, result, reason) — filled during pass
+
             for symbol in symbols:
                 if symbol in snoozed: continue
                 try:
@@ -215,7 +225,7 @@ async def market_scan_loop(app):
                     if result.get("error"):
                         continue
 
-                    # --- Evaluate both alert types before deciding ---
+                    # --- Crime pump: evaluate and fire immediately if triggered ---
                     prev_crime = last_alerted.get(symbol, 0)
                     is_crime, crime_reason, label = is_crime_pump_setup(result)
                     result["label"] = label
@@ -224,24 +234,35 @@ async def market_scan_loop(app):
                                    and (result.get("dynamic_alert") or result["crime_score"] >= 90)
                                    and result["crime_score"] > prev_crime + 8)
 
-                    prev_trend = last_trend_alerted.get(symbol, 0)
-                    is_trend, trend_reason = is_trend_setup(result)
-                    trend_fires = is_trend and result["trend_score"] > prev_trend + 8
-
-                    # Crime pump takes priority — elif ensures at most one alert per token per cycle
                     if crime_fires:
                         await send_crime_alert(app, result)
                         last_alerted[symbol] = result["crime_score"]
                         logger.info(f"CRIME ALERT: {symbol} [{label}] score={result['crime_score']} — {crime_reason}")
-                    elif trend_fires:
-                        await send_trend_alert(app, result)
-                        last_trend_alerted[symbol] = result["trend_score"]
-                        logger.info(f"TREND ALERT: {symbol} score={result['trend_score']} — {trend_reason}")
+                    else:
+                        # --- Trend setup: collect candidates for end-of-cycle ranking ---
+                        is_trend, trend_reason = is_trend_setup(result)
+                        if is_trend:
+                            last_trend_time = last_trend_alerted.get(symbol, 0)
+                            if time.time() - last_trend_time >= TREND_COOLDOWN_SECONDS:
+                                trend_candidates.append(
+                                    (result["trend_score"], symbol, result, trend_reason)
+                                )
 
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     logger.error(f"Scan error {symbol}: {e}")
-            logger.info(f"Scan complete. {scan_stats['tokens_scanned']} tokens checked.")
+
+            # --- After full pass: send top 3 trend setups ranked by score ---
+            trend_candidates.sort(key=lambda x: x[0], reverse=True)
+            top3 = trend_candidates[:3]
+            total = len(top3)
+            for rank, (ts, sym, res, reason) in enumerate(top3, 1):
+                await send_trend_alert(app, res, rank=rank, total=total)
+                last_trend_alerted[sym] = time.time()
+                logger.info(f"TREND ALERT #{rank}/{total}: {sym} score={ts} — {reason}")
+
+            logger.info(f"Scan complete. {scan_stats['tokens_scanned']} tokens checked, "
+                        f"{total} trend alert(s) sent.")
         except Exception as e:
             logger.error(f"Cycle error: {e}")
         await asyncio.sleep(SCAN_INTERVAL_MINUTES * 60)

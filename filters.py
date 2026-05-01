@@ -48,42 +48,47 @@ def is_crime_pump_setup(result):
 
 
 def is_trend_setup(result):
-    raw         = result.get("raw", {})
-    fr          = raw.get("funding_rate")
-    lsr         = raw.get("ls_ratio")
-    vol         = raw.get("volume_24h", 0)
-    oi          = raw.get("open_interest", 0)
-    pc          = raw.get("price_change_24h", 0)
-    trend_score = result.get("trend_score", 0)
-    vm          = vol / 1_000_000 if vol else 0
-    om          = oi  / 1_000_000 if oi  else 0
+    raw           = result.get("raw", {})
+    fr            = raw.get("funding_rate")
+    lsr           = raw.get("ls_ratio")
+    vol           = raw.get("volume_24h", 0)
+    oi            = raw.get("open_interest", 0)
+    pc            = raw.get("price_change_24h", 0)
+    dynamic_score = result.get("dynamic_score", 0)
+    trend_score   = result.get("trend_score", 0)
+    vm            = vol / 1_000_000 if vol else 0
+    om            = oi  / 1_000_000 if oi  else 0
 
-    # MUST: funding between 0 and +0.03% — longs in control but not crowded
-    if fr is None or not (0 <= fr <= 0.03):
+    # MUST: funding in the sweet spot — longs in control, not yet crowded
+    if fr is None or not (0.005 <= fr <= 0.025):
         fr_str = f"{fr:+.4f}%" if fr is not None else "N/A"
-        return False, f"Funding {fr_str} outside 0–+0.03%"
+        return False, f"Funding {fr_str} outside 0.005–0.025%"
 
-    # MUST: L/S ratio above 1.1 — longs dominant
-    if lsr is None or lsr <= 1.1:
+    # MUST: strong long dominance
+    if lsr is None or lsr < 1.35:
         lsr_str = f"{lsr:.2f}" if lsr is not None else "N/A"
-        return False, f"L/S {lsr_str} ≤ 1.1"
+        return False, f"L/S {lsr_str} < 1.35"
 
-    # MUST: price trending up but not overbought
-    if not (1 <= pc <= 20):
-        return False, f"Price change {pc:.1f}% outside +1% to +20%"
+    # MUST: early trend only — no exceptions for later-stage moves
+    if not (3.0 <= pc <= 7.0):
+        return False, f"Price change {pc:.1f}% outside 3.0–7.0%"
 
-    # MUST: volume above $5M — buyer conviction
-    if vm < 5:
-        return False, f"Vol ${vm:.1f}M < $5M"
+    # MUST: real volume conviction
+    if vm < 15:
+        return False, f"Vol ${vm:.1f}M < $15M"
 
-    # MUST: OI above $3M — real money involved
-    if om < 3:
-        return False, f"OI ${om:.1f}M < $3M"
+    # MUST: substantial open interest (raw dollar value, not ratio)
+    if oi < 6_000_000:
+        return False, f"OI ${om:.1f}M < $6M"
 
-    # MUST: trend score at or above 70
-    if trend_score < 70:
-        return False, f"Trend score {trend_score} < 70"
+    # MUST: active momentum right now — the most important gate
+    if dynamic_score < 15:
+        return False, f"Dynamic score {dynamic_score} < 15"
+
+    # MUST: high conviction composite score
+    if trend_score < 88:
+        return False, f"Trend score {trend_score} < 88"
 
     reason = (f"Vol ${vm:.1f}M | OI ${om:.1f}M | L/S {lsr:.2f} | "
-              f"Price +{pc:.1f}% | Score {trend_score}")
+              f"Price +{pc:.1f}% | Dynamic {dynamic_score} | Score {trend_score}")
     return True, reason
