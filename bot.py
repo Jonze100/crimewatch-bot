@@ -4,12 +4,13 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.request import HTTPXRequest
 from scanner import scan_token, get_binance_symbols
-from filters import is_crime_pump_setup
+from filters import is_crime_pump_setup, is_trend_setup
 from config import BOT_TOKEN, ALERT_CHAT_IDS, SCAN_INTERVAL_MINUTES, MIN_ALERT_SCORE
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-last_alerted = {}
+last_alerted       = {}   # symbol → last crime_score that triggered an alert
+last_trend_alerted = {}   # symbol → last trend_score that triggered an alert
 snoozed = set()
 scan_stats = {"last_scan":"Never","tokens_scanned":0,"alerts_sent":0}
 
@@ -19,16 +20,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ALERT_CHAT_IDS.append(chat_id)
     await update.message.reply_text(
         "🔮 *Crime Watch*\n\n"
-        "Detects crime pump setups before they happen.\n\n"
-        "*Filter criteria (STO/ARIA/RAVE pattern):*\n"
+        "Detects two types of setups:\n\n"
+        "*🚨 CRIME PUMP (STO/ARIA/RAVE pattern):*\n"
         "  • Volume ≤ $8M — nobody watching\n"
         "  • OI ≥ 2.5x volume — stealth buildup\n"
         "  • OI ≥ $3M — real money involved\n"
         "  • L/S ≤ 0.75 — shorts dominant\n"
         "  • Price flat ≤ ±5% — pump not started\n"
         "  • Funding ≤ +0.015% — no long crowding yet\n\n"
-        "✅ *CONFIRMED* — L/S < 0.67, funding negative, vol < $3M\n"
-        "⚠️ *POTENTIAL* — passes all filters, less extreme\n\n"
+        "  ✅ *CONFIRMED* — L/S < 0.67, funding negative, vol < $3M\n"
+        "  ⚠️ *POTENTIAL* — passes all filters, less extreme\n\n"
+        "*📈 TREND SETUP:*\n"
+        "  • Funding 0–+0.03% — longs in control\n"
+        "  • L/S > 1.1 — long dominant\n"
+        "  • Price +1% to +20% — trending\n"
+        "  • Volume > $5M — buyer conviction\n"
+        "  • OI > $3M — real positions\n"
+        "  • Trend score ≥ 70\n\n"
         "• /scan SYMBOL — Manual scan\n"
         "• /status — Bot status\n"
         "• /snooze SYMBOL — Mute a token\n"
@@ -70,9 +78,11 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🟢 *Crime Watch — Running*\n\n"
         f"  • Last scan: {scan_stats['last_scan']}\n"
         f"  • Tokens scanned: {scan_stats['tokens_scanned']}\n"
-        f"  • Alerts sent: {scan_stats['alerts_sent']}\n"
-        f"  • Filter: Vol ≤$8M | OI/Vol ≥2.5x | L/S ≤0.75 | OI ≥$3M\n"
-        f"  • Min score: {MIN_ALERT_SCORE} | Fires on dynamic signal or score ≥90\n"
+        f"  • Alerts sent: {scan_stats['alerts_sent']}\n\n"
+        f"*Crime pump:* Vol ≤$8M | OI/Vol ≥2.5x | L/S ≤0.75 | OI ≥$3M\n"
+        f"  Min score: {MIN_ALERT_SCORE} | Fires on dynamic signal or score ≥90\n\n"
+        f"*Trend setup:* Funding 0–+0.03% | L/S >1.1 | Price +1–20% | OI >$3M\n"
+        f"  Min trend score: 70\n\n"
         f"  • Your chat ID: `{update.effective_chat.id}`",
         parse_mode="Markdown"
     )
@@ -137,6 +147,33 @@ def fmt(r):
     lines.append(f"[🔵 Trade on Bitunix]({trade_url})")
     return "\n".join(lines)
 
+def fmt_trend(r):
+    ts        = r.get("trend_score", 0)
+    trade_url = f"https://www.bitunix.com/futures/{r['symbol']}"
+    time_now  = datetime.datetime.utcnow().strftime("%H:%M UTC")
+
+    lines = [
+        f"🔮 *{r['symbol']}* {r.get('exchange','Binance')}  |  *{ts}/100*",
+        "",
+        f"Price:          {r.get('price','N/A')}  ({r.get('price_change','N/A')})",
+        f"24h volume:     {r.get('volume_24h','N/A')}",
+        f"Open interest:  {r.get('open_interest','N/A')}",
+        f"Funding rate:   {r.get('funding_rate','N/A')}",
+        f"L/S ratio:      {r.get('ls_ratio','N/A')}",
+        f"Basis:          {r.get('basis','N/A')}",
+        f"Time:           {time_now}",
+        ""
+    ]
+    if r.get("trend_signals"):
+        lines.append("*Why trending:*")
+        for sig in r["trend_signals"]:
+            lines.append(f"  • {sig}")
+        lines.append("")
+    lines.append("⚡ Trend confirmed — ride the momentum.")
+    lines.append("")
+    lines.append(f"[🔵 Trade on Bitunix]({trade_url})")
+    return "\n".join(lines)
+
 async def send_crime_alert(app, result):
     label  = result.get("label", "SETUP")
     header = ("✅ CONFIRMED CRIME PUMP" if label == "CONFIRMED"
@@ -148,7 +185,17 @@ async def send_crime_alert(app, result):
             await app.bot.send_message(int(cid), text, parse_mode="Markdown",
                                        disable_web_page_preview=True)
         except Exception as e:
-            logger.error(f"Alert failed {cid}: {e}")
+            logger.error(f"Crime alert failed {cid}: {e}")
+
+async def send_trend_alert(app, result):
+    text = f"📈 *TREND SETUP — {result['symbol']}*\n\n" + fmt_trend(result)
+    scan_stats["alerts_sent"] += 1
+    for cid in ALERT_CHAT_IDS:
+        try:
+            await app.bot.send_message(int(cid), text, parse_mode="Markdown",
+                                       disable_web_page_preview=True)
+        except Exception as e:
+            logger.error(f"Trend alert failed {cid}: {e}")
 
 async def market_scan_loop(app):
     while True:
@@ -167,16 +214,30 @@ async def market_scan_loop(app):
                     result = await scan_token(symbol)
                     if result.get("error"):
                         continue
-                    prev = last_alerted.get(symbol, 0)
-                    is_crime, reason, label = is_crime_pump_setup(result)
+
+                    # --- Evaluate both alert types before deciding ---
+                    prev_crime = last_alerted.get(symbol, 0)
+                    is_crime, crime_reason, label = is_crime_pump_setup(result)
                     result["label"] = label
-                    if (is_crime
-                            and result["crime_score"] >= MIN_ALERT_SCORE
-                            and (result.get("dynamic_alert") or result["crime_score"] >= 90)
-                            and result["crime_score"] > prev + 8):
+                    crime_fires = (is_crime
+                                   and result["crime_score"] >= MIN_ALERT_SCORE
+                                   and (result.get("dynamic_alert") or result["crime_score"] >= 90)
+                                   and result["crime_score"] > prev_crime + 8)
+
+                    prev_trend = last_trend_alerted.get(symbol, 0)
+                    is_trend, trend_reason = is_trend_setup(result)
+                    trend_fires = is_trend and result["trend_score"] > prev_trend + 8
+
+                    # Crime pump takes priority — elif ensures at most one alert per token per cycle
+                    if crime_fires:
                         await send_crime_alert(app, result)
                         last_alerted[symbol] = result["crime_score"]
-                        logger.info(f"ALERT: {symbol} [{label}] score={result['crime_score']} — {reason}")
+                        logger.info(f"CRIME ALERT: {symbol} [{label}] score={result['crime_score']} — {crime_reason}")
+                    elif trend_fires:
+                        await send_trend_alert(app, result)
+                        last_trend_alerted[symbol] = result["trend_score"]
+                        logger.info(f"TREND ALERT: {symbol} score={result['trend_score']} — {trend_reason}")
+
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     logger.error(f"Scan error {symbol}: {e}")

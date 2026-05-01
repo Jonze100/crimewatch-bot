@@ -45,3 +45,45 @@ def is_crime_pump_setup(result):
     lsr_str = f"{lsr:.2f}" if lsr is not None else "N/A"
     reason  = f"Vol ${vm:.1f}M | OI ${om:.1f}M | OI/Vol {oi_vol:.1f}x | L/S {lsr_str}"
     return True, reason, label
+
+
+def is_trend_setup(result):
+    raw         = result.get("raw", {})
+    fr          = raw.get("funding_rate")
+    lsr         = raw.get("ls_ratio")
+    vol         = raw.get("volume_24h", 0)
+    oi          = raw.get("open_interest", 0)
+    pc          = raw.get("price_change_24h", 0)
+    trend_score = result.get("trend_score", 0)
+    vm          = vol / 1_000_000 if vol else 0
+    om          = oi  / 1_000_000 if oi  else 0
+
+    # MUST: funding between 0 and +0.03% — longs in control but not crowded
+    if fr is None or not (0 <= fr <= 0.03):
+        fr_str = f"{fr:+.4f}%" if fr is not None else "N/A"
+        return False, f"Funding {fr_str} outside 0–+0.03%"
+
+    # MUST: L/S ratio above 1.1 — longs dominant
+    if lsr is None or lsr <= 1.1:
+        lsr_str = f"{lsr:.2f}" if lsr is not None else "N/A"
+        return False, f"L/S {lsr_str} ≤ 1.1"
+
+    # MUST: price trending up but not overbought
+    if not (1 <= pc <= 20):
+        return False, f"Price change {pc:.1f}% outside +1% to +20%"
+
+    # MUST: volume above $5M — buyer conviction
+    if vm < 5:
+        return False, f"Vol ${vm:.1f}M < $5M"
+
+    # MUST: OI above $3M — real money involved
+    if om < 3:
+        return False, f"OI ${om:.1f}M < $3M"
+
+    # MUST: trend score at or above 70
+    if trend_score < 70:
+        return False, f"Trend score {trend_score} < 70"
+
+    reason = (f"Vol ${vm:.1f}M | OI ${om:.1f}M | L/S {lsr:.2f} | "
+              f"Price +{pc:.1f}% | Score {trend_score}")
+    return True, reason
