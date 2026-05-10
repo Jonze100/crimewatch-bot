@@ -9,15 +9,35 @@ BINANCE_ENDPOINTS = [
     "https://fapi2.binance.com",
     "https://fapi3.binance.com",
 ]
+BINANCE_SPOT = "https://api.binance.com/api/v3"
 BITUNIX = "https://fapi.bitunix.com"
 
-async def safe_get(session, url):
-    try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
-            if r.status == 200:
-                return await r.json()
-    except Exception as e:
-        logger.warning(f"Request failed {url}: {e}")
+async def safe_get(session, url, retries=1):
+    """GET with one retry on transient network errors (3s → 6s backoff).
+    Returns None immediately on 4xx/5xx — no point retrying a geo-block."""
+    delay = 3
+    for attempt in range(retries + 1):
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                if r.status == 200:
+                    return await r.json()
+                if r.status == 429 and attempt < retries:
+                    logger.warning(f"Rate limited {url}, retrying in {delay}s")
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                    continue
+                return None
+        except (aiohttp.ClientConnectorError, asyncio.TimeoutError,
+                aiohttp.ServerDisconnectedError) as e:
+            if attempt < retries:
+                logger.warning(f"Transient error {url} (attempt {attempt+1}), retrying in {delay}s: {e}")
+                await asyncio.sleep(delay)
+                delay *= 2
+            else:
+                logger.warning(f"Request failed {url}: {e}")
+        except Exception as e:
+            logger.warning(f"Request error {url}: {e}")
+            return None
     return None
 
 async def get_binance_symbols(session):
@@ -27,6 +47,13 @@ async def get_binance_symbols(session):
             usdt = [t for t in data if t.get("symbol","").endswith("USDT")]
             usdt.sort(key=lambda x: float(x.get("quoteVolume",0)), reverse=True)
             return [t["symbol"] for t in usdt]
+    # Last resort: spot API — same symbol names, different volume profile
+    logger.warning("All fapi endpoints failed for symbol list, trying spot API")
+    data = await safe_get(session, f"{BINANCE_SPOT}/ticker/24hr")
+    if data and isinstance(data, list):
+        usdt = [t for t in data if t.get("symbol","").endswith("USDT")]
+        usdt.sort(key=lambda x: float(x.get("quoteVolume",0)), reverse=True)
+        return [t["symbol"] for t in usdt]
     return []
 
 async def fetch_binance(session, symbol):
@@ -53,6 +80,20 @@ async def fetch_binance(session, symbol):
                     "low_24h":float(ticker.get("lowPrice",0)),"found":True}
         except Exception as e:
             logger.warning(f"Binance error {base} {symbol}: {e}")
+    # Last resort: spot API — no futures data (funding/OI/LS unavailable)
+    try:
+        ticker = await safe_get(session, f"{BINANCE_SPOT}/ticker/24hr?symbol={symbol}")
+        if ticker and float(ticker.get("lastPrice", 0)) > 0:
+            price = float(ticker["lastPrice"])
+            logger.warning(f"Using spot API fallback for {symbol} (no futures data)")
+            return {"exchange":"Binance-Spot","price":price,
+                    "volume_24h":float(ticker.get("quoteVolume",0)),
+                    "open_interest":0,"funding_rate":None,"ls_ratio":None,"basis":0,
+                    "price_change_24h":float(ticker.get("priceChangePercent",0)),
+                    "high_24h":float(ticker.get("highPrice",0)),
+                    "low_24h":float(ticker.get("lowPrice",0)),"found":True}
+    except Exception as e:
+        logger.warning(f"Spot API fallback failed {symbol}: {e}")
     return {"found":False}
 
 async def fetch_bitunix(session, symbol):
