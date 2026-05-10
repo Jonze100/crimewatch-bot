@@ -1,5 +1,6 @@
-import asyncio, logging, datetime, time, os
+import asyncio, logging, datetime, time, os, json
 import aiohttp
+from aiohttp import web
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.request import HTTPXRequest
@@ -14,12 +15,33 @@ last_trend_alerted = {}   # symbol → unix timestamp of last trend alert (4h co
 snoozed = set()
 scan_stats = {"last_scan":"Never","tokens_scanned":0,"alerts_sent":0}
 
+CHAT_IDS_FILE = "chat_ids.json"
+
+def load_chat_ids():
+    """Load persisted chat IDs from disk and merge with env-var ones."""
+    try:
+        if os.path.exists(CHAT_IDS_FILE):
+            stored = json.load(open(CHAT_IDS_FILE))
+            for cid in stored:
+                if cid not in ALERT_CHAT_IDS:
+                    ALERT_CHAT_IDS.append(cid)
+    except Exception as e:
+        logger.warning(f"Could not load chat IDs: {e}")
+
+def save_chat_ids():
+    try:
+        with open(CHAT_IDS_FILE, "w") as f:
+            json.dump(ALERT_CHAT_IDS, f)
+    except Exception as e:
+        logger.warning(f"Could not save chat IDs: {e}")
+
 TREND_COOLDOWN_SECONDS = 4 * 3600   # 4 hours between trend alerts per symbol
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     if chat_id not in ALERT_CHAT_IDS:
         ALERT_CHAT_IDS.append(chat_id)
+        save_chat_ids()
     await update.message.reply_text(
         "🔮 *Crime Watch*\n\n"
         "Detects two types of setups:\n\n"
@@ -267,7 +289,29 @@ async def market_scan_loop(app):
             logger.error(f"Cycle error: {e}")
         await asyncio.sleep(SCAN_INTERVAL_MINUTES * 60)
 
+async def health_server():
+    """Minimal HTTP server so Railway's health checks pass when PORT is set."""
+    port = int(os.environ.get("PORT", 0))
+    if not port:
+        return
+    async def handle(_request):
+        return web.Response(text="OK")
+    srv = web.Application()
+    srv.router.add_get("/", handle)
+    srv.router.add_get("/health", handle)
+    runner = web.AppRunner(srv)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", port).start()
+    logger.info(f"Health server listening on port {port}")
+
 async def main():
+    if not BOT_TOKEN:
+        logger.critical("BOT_TOKEN is not set — cannot start")
+        return
+
+    load_chat_ids()
+    logger.info(f"Loaded {len(ALERT_CHAT_IDS)} alert chat ID(s)")
+
     req = HTTPXRequest(connect_timeout=30, read_timeout=30, write_timeout=30)
     app = Application.builder().token(BOT_TOKEN).request(req).build()
     for cmd, fn in [
@@ -280,6 +324,7 @@ async def main():
     async with app:
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        asyncio.create_task(health_server())
         asyncio.create_task(market_scan_loop(app))
         await asyncio.Event().wait()
         await app.updater.stop()
