@@ -1,5 +1,6 @@
 import aiohttp, asyncio, logging
 from memory import detect_dynamic_signals, load_memory
+from alpha_tokens import ALPHA_TOKENS
 logger = logging.getLogger(__name__)
 load_memory()
 
@@ -233,6 +234,7 @@ async def scan_token(symbol: str):
         "risk_signals":  risk_signals,
         "pump_signal":   pump,
         "dynamic_alert": is_dynamic,
+        "is_alpha":      symbol in ALPHA_TOKENS,
         "raw": {
             "funding_rate":     fr,
             "ls_ratio":         lsr,

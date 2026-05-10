@@ -124,7 +124,12 @@ def fmt(r):
     trade_url = f"https://www.bitunix.com/futures/{r['symbol']}"
     time_now  = datetime.datetime.utcnow().strftime("%H:%M UTC")
 
-    lines = [f"🔮 *{r['symbol']}* {r.get('exchange','Binance')}  |  *{sc}/100 ({lbl})*{label_str}"]
+    if r.get("is_alpha"):
+        lines = [f"🔥 *ALPHA TOKEN — CRIME PUMP SETUP DETECTED — {r['symbol']}*",
+                 f"_({r.get('exchange','Binance')} | {sc}/100 {lbl}{label_str})_",
+                 "⚡ Binance Alpha token — higher retail attention + narrative fuel"]
+    else:
+        lines = [f"🔮 *{r['symbol']}* {r.get('exchange','Binance')}  |  *{sc}/100 ({lbl})*{label_str}"]
     if dyn_sc > 0:
         lines.append(f"_Score: Static {stat_sc} + Dynamic +{dyn_sc}_")
     lines += [
@@ -160,8 +165,12 @@ def fmt(r):
 
 async def send_crime_alert(app, result):
     label  = result.get("label", "SETUP")
-    header = ("✅ CONFIRMED CRIME PUMP" if label == "CONFIRMED"
-              else "⚠️ POTENTIAL CRIME PUMP")
+    if result.get("is_alpha"):
+        header = "🔥 ALPHA TOKEN — CRIME PUMP SETUP DETECTED"
+    elif label == "CONFIRMED":
+        header = "✅ CONFIRMED CRIME PUMP"
+    else:
+        header = "⚠️ POTENTIAL CRIME PUMP"
     text = f"🚨 *{header} — {result['symbol']}*\n\n" + fmt(result)
     scan_stats["alerts_sent"] += 1
     for cid in ALERT_CHAT_IDS:
@@ -182,9 +191,15 @@ async def market_scan_loop(app):
             ) as session:
                 symbols = await get_binance_symbols(session)
 
-            logger.info(f"get_binance_symbols returned {len(symbols)} symbols")
+            logger.info(f"get_binance_symbols returned {len(symbols)} symbols (attempt 1)")
             if not symbols:
-                logger.error("Binance API blocked or unreachable — 0 symbols returned, skipping cycle")
+                logger.warning("Attempt 1 returned 0 symbols — retrying with plain session")
+                async with aiohttp.ClientSession() as session:
+                    symbols = await get_binance_symbols(session)
+                logger.info(f"get_binance_symbols returned {len(symbols)} symbols (attempt 2)")
+
+            if not symbols:
+                logger.error("Binance API blocked or unreachable — 0 symbols after retry, skipping cycle")
                 scan_stats["tokens_scanned"] = 0
             else:
                 scan_stats["tokens_scanned"] = len(symbols)
@@ -199,8 +214,9 @@ async def market_scan_loop(app):
                         prev_crime = last_alerted.get(symbol, 0)
                         is_crime, crime_reason, label = is_crime_pump_setup(result)
                         result["label"] = label
+                        threshold = MIN_ALERT_SCORE - 5 if result.get("is_alpha") else MIN_ALERT_SCORE
                         crime_fires = (is_crime
-                                       and result["crime_score"] >= MIN_ALERT_SCORE
+                                       and result["crime_score"] >= threshold
                                        and (result.get("dynamic_alert") or result["crime_score"] >= 90)
                                        and result["crime_score"] > prev_crime + 8)
 
