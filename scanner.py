@@ -7,6 +7,73 @@ load_memory()
 SYMBOLS_CACHE_FILE = "binance_symbols.json"
 SYMBOLS_CACHE_TTL  = 86400  # 24 hours
 
+ALL_BINANCE_FUTURES = [
+    # Mega cap
+    "BTCUSDT",  "ETHUSDT",  "BNBUSDT",  "SOLUSDT",   "XRPUSDT",
+    "ADAUSDT",  "DOGEUSDT", "AVAXUSDT", "TRXUSDT",   "DOTUSDT",
+    "LINKUSDT", "MATICUSDT","LTCUSDT",  "BCHUSDT",   "ATOMUSDT",
+    # Large cap
+    "UNIUSDT",  "NEARUSDT", "APTUSDT",  "OPUSDT",    "ARBUSDT",
+    "SUIUSDT",  "INJUSDT",  "TIAUSDT",  "FILUSDT",   "ICPUSDT",
+    "STXUSDT",  "RUNEUSDT", "AAVEUSDT", "MKRUSDT",   "SNXUSDT",
+    "LDOUSDT",  "CRVUSDT",  "COMPUSDT", "GRTUSDT",   "IMXUSDT",
+    "SEIUSDT",  "MNTUSDT",
+    # Established L1 / alt chains
+    "KAVAUSDT", "BANDUSDT", "FLOWUSDT", "HBARUSDT",  "VETUSDT",
+    "ALGOUSDT", "EGLDUSDT", "THETAUSDT","IOTXUSDT",  "ICXUSDT",
+    "ZRXUSDT",  "BATUSDT",  "ZILUSDT",  "ONTUSDT",   "QTUMUSDT",
+    "IOTAUSDT", "WAVESUSDT","RVNUSDT",  "SKLUSDT",   "NKNUSDT",
+    "COTIUSDT", "SXPUSDT",
+    # DeFi protocols
+    "DYDXUSDT", "GMXUSDT",  "PENDLEUSDT","RDNTUSDT", "WOOUSDT",
+    "1INCHUSDT","CAKEUSDT", "SUSHIUSDT","BALUSDT",   "KNCUSDT",
+    "ENAUSDT",  "PERPUSDT",
+    # Gaming / metaverse
+    "SANDUSDT", "AXSUSDT",  "MANAUSDT", "GALAUSDT",  "CHZUSDT",
+    "ENJUSDT",  "YGGUSDT",  "MAGICUSDT","ILVUSDT",   "ALICEUSDT",
+    "VOXELUSDT","TLMUSDT",
+    # New L2 / ZK / modular chains (2023-2025)
+    "STRKUSDT", "ZKUSDT",   "MANTAUSDT","BLASTUSDT", "SCRUSDT",
+    "WUSDT",    "ZROUSDT",  "AEVOUSDT", "ETHFIUSDT", "REZUSDT",
+    "BBUSDT",   "IOUSDT",   "LISTAUSDT","GLMRUSDT",
+    # Solana ecosystem
+    "JUPUSDT",  "BONKUSDT", "WIFUSDT",  "BOMEUSDT",  "JITOUSDT",
+    "PYTHUSDT", "RAYUSDT",
+    # AI / DePIN / compute
+    "RENDERUSDT","FETUSDT", "WLDUSDT",  "AGIXUSDT",  "OCEANUSDT",
+    "ARKMUSDT", "EIGENUSDT","ALTUSDT",  "GRASSUSDT", "TAOUSDT",
+    # TON / messaging ecosystem
+    "TONUSDT",  "NOTUSDT",  "DOGSUSDT", "HMSTRUSDT", "CATIUSDT",
+    # Mid-cap established
+    "APEUSDT",  "GMTUSDT",  "BLURUSDT", "MASKUSDT",  "SUPERUSDT",
+    "REEFUSDT", "SFPUSDT",  "DUSKUSDT", "ROSEUSDT",  "KLAYUSDT",
+    "CFXUSDT",  "HIGHUSDT", "ACHUSDT",  "JASMYUSDT", "HOOKUSDT",
+    "PEOPLEUSDT","LUNCUSDT","CYBERUSDT","ARKUSDT",   "ACEUSDT",
+    "NFPUSDT",  "PIXELUSDT","AIUSDT",   "XAIUSDT",   "CVCUSDT",
+    "POWRUSDT", "OMUSDT",   "SUNUSDT",
+    # BNB chain native
+    "BAKEUSDT", "BNXUSDT",  "CTKUSDT",  "ALPHAUSDT", "BETAUSDT",
+    "LINAUSDT", "DEGOUSDT",
+    # Sports / fan tokens
+    "PSGUSDT",  "BARUSDT",  "CITYUSDT", "SANTOSUSDT","LAZIOUSDT",
+    "JUVUSDT",  "ACMUSDT",  "OGUSDT",   "PORTOUSDT",
+    # Binance Alpha & notable 2024-2025
+    "VANAUSDT",     "KAIAUSDT",    "BERAUSDT",    "SONICUSDT",
+    "ZETAUSDT",     "SOONUSDT",    "IRYSUSDT",    "PEAQUSDT",
+    "SQDUSDT",      "CARVUSDT",    "ZORAUSDT",    "MAGMAUSDT",
+    "MERLUSDT",     "MOVEUSDT",    "MEUSDT",      "VIRTUALUSDT",
+    "POPCATUSDT",   "MOODENGUSDT", "MOGUSDT",     "MEWUSDT",
+    "PLAYERUSDT",   "FARTCOINUSDT","SPXUSDT",     "PIPUSDT",
+    "ACTUSDT",      "GRIFFAINUSDT","COOKIEUSDT",  "AI16ZUSDT",
+    "AIXBTUSDT",    "TAIUSDT",     "CGPTUSDT",    "GPTUSDT",
+    "GOODAIUSDT",   "ARCUSDT",     "PIPPINUSDT",  "ZEREBRUSDT",
+    "NOUSDT",       "PROMPTUSDT",  "SENTIENTUSDT","NEIROUSDT",
+    "BANANAUSDT",   "B3USDT",      "DOODUSDT",    "ALCHUSDT",
+    "SAFEUSDT",     "NAORIUSDT",   "CROSSUSDT",   "MYXUSDT",
+    "BIRBUSDT",     "ALEOUSDT",    "VELOUSDT",    "KGENUSDT",
+    "COAIUSDT",     "TOSHIUSDT",   "FLUIDUSDT",
+]
+
 BINANCE_ENDPOINTS = [
     "https://fapi.binance.com",
     "https://fapi1.binance.com",
@@ -45,8 +112,16 @@ async def safe_get(session, url, retries=1):
             return None
     return None
 
+def _save_cache(symbols):
+    try:
+        with open(SYMBOLS_CACHE_FILE, "w") as f:
+            json.dump({"ts": time.time(), "symbols": symbols}, f)
+        logger.info(f"Saved {len(symbols)} symbols to {SYMBOLS_CACHE_FILE}")
+    except Exception as e:
+        logger.warning(f"Cache write failed: {e}")
+
 async def get_binance_symbols():
-    # 1. Check cache (under 24 hours old)
+    # 1. Cache hit — skip all network calls for 24h
     if os.path.exists(SYMBOLS_CACHE_FILE):
         try:
             with open(SYMBOLS_CACHE_FILE) as f:
@@ -59,48 +134,45 @@ async def get_binance_symbols():
         except Exception as e:
             logger.warning(f"Cache read failed: {e}")
 
-    # 2. Fetch ALL symbols from CoinGecko with pagination (per_page=100)
-    logger.info("Fetching symbol list from CoinGecko derivatives (paginated)...")
-    try:
-        async with aiohttp.ClientSession(
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=aiohttp.ClientTimeout(total=30)
-        ) as session:
-            seen, symbols, page = set(), [], 1
-            while True:
-                url = f"{COINGECKO_PERPS}?per_page=100&page={page}"
-                data = await safe_get(session, url)
-                if not data or not isinstance(data, dict):
-                    break
-                tickers = data.get("tickers", [])
-                if not tickers:
-                    break
-                for item in tickers:
-                    coin = item.get("coin", "")
-                    if not coin:
-                        continue
-                    sym = coin.upper() + "USDT"
-                    if sym not in seen:
-                        seen.add(sym)
-                        symbols.append(sym)
-                if len(tickers) < 100:
-                    break
-                page += 1
-
-            if symbols:
-                logger.info(f"CoinGecko returned {len(symbols)} symbols across {page} page(s)")
-                try:
-                    with open(SYMBOLS_CACHE_FILE, "w") as f:
-                        json.dump({"ts": time.time(), "symbols": symbols}, f)
-                except Exception as e:
-                    logger.warning(f"Cache write failed: {e}")
+    async with aiohttp.ClientSession(
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=aiohttp.ClientTimeout(total=30)
+    ) as session:
+        # 2. Binance fapi — fast, works locally; geo-blocked on some hosting
+        for base in BINANCE_ENDPOINTS:
+            data = await safe_get(session, f"{base}/fapi/v1/ticker/24hr")
+            if data and isinstance(data, list) and len(data) > 50:
+                usdt = [t for t in data if t.get("symbol", "").endswith("USDT")]
+                usdt.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
+                symbols = [t["symbol"] for t in usdt]
+                logger.info(f"Binance fapi ({base}) returned {len(symbols)} symbols")
+                _save_cache(symbols)
                 return symbols
-    except Exception as e:
-        logger.warning(f"CoinGecko fetch failed: {e}")
 
-    # 3. Emergency fallback — Alpha tokens are the most important to scan anyway
-    logger.error("CoinGecko failed — falling back to ALPHA_TOKENS emergency list")
-    return list(ALPHA_TOKENS)
+        # 3. CoinGecko include_tickers=all — bypasses Binance geo-block
+        logger.warning("Binance fapi unavailable, trying CoinGecko (include_tickers=all)...")
+        data = await safe_get(session, f"{COINGECKO_PERPS}?include_tickers=all")
+        if data and isinstance(data, dict):
+            tickers = data.get("tickers", [])
+            seen, symbols = set(), []
+            for t in tickers:
+                base_coin = t.get("base", "")
+                target    = t.get("target", "")
+                if target != "USDT" or not base_coin:
+                    continue
+                sym = base_coin.upper() + "USDT"
+                if sym not in seen:
+                    seen.add(sym)
+                    symbols.append(sym)
+            if symbols:
+                logger.info(f"CoinGecko returned {len(symbols)} symbols")
+                _save_cache(symbols)
+                return symbols
+            logger.warning("CoinGecko responded but had 0 USDT tickers")
+
+    # 4. Hardcoded fallback — 200+ known Binance futures tokens, never < 32
+    logger.error("All live sources failed — using ALL_BINANCE_FUTURES hardcoded list")
+    return list(ALL_BINANCE_FUTURES)
 
 async def fetch_binance(session, symbol):
     for base in BINANCE_ENDPOINTS:

@@ -1,14 +1,30 @@
-# Binance Alpha tokens — AI and gaming focused
-# Used to lower the alert threshold by 5 pts and add narrative context to alerts.
-# Note: "ZEREBROUS USDT" and "SONIC USDT" from the original list had spaces — fixed to
-# "ZEREBRUSDT" and "SONICUSDT" so they can actually match Binance symbol names.
+# Binance Alpha program tokens — lowers crime pump threshold by 5 pts and adds
+# narrative context to alerts. Non-futures pairs silently fail at scan time.
 ALPHA_TOKENS = {
-    "FARTCOINUSDT", "ACTUSDT",     "MOVEUSDT",    "VANAUSDT",
-    "KAIAUSDT",     "GRIFFAINUSDT","AIXBTUSDT",   "COOKIEUSDT",
-    "MEUSDT",       "RENDERUSDT",  "FETUSDT",     "WLDUSDT",
-    "TAIUSDT",      "CGPTUSDT",    "AGIXUSDT",    "OCEANUSDT",
-    "GPTUSDT",      "VIRTUALUSDT", "EIGENUSDT",   "ALTUSDT",
-    "PLAYERUSDT",   "GOODAIUSDT",  "ARCUSDT",     "BERAUSDT",
-    "PIPPINUSDT",   "ZEREBRUSDT",  "PIPUSDT",     "SONICUSDT",
-    "SPXUSDT",      "NOUSDT",      "PROMPTUSDT",  "SENTIENTUSDT",
+    # AI agents / inference
+    "AIXBTUSDT",    "ACTUSDT",      "COOKIEUSDT",   "VIRTUALUSDT",
+    "GRIFFAINUSDT", "GOODAIUSDT",   "TAIUSDT",      "GPTUSDT",
+    "CGPTUSDT",     "AI16ZUSDT",    "PROMPTUSDT",   "SENTIENTUSDT",
+    "PIPPINUSDT",   "ZEREBRUSDT",   "NOUSDT",       "ARCUSDT",
+
+    # AI infrastructure / data / compute
+    "RENDERUSDT",   "FETUSDT",      "AGIXUSDT",     "OCEANUSDT",
+    "WLDUSDT",      "ALTUSDT",      "EIGENUSDT",    "GRASSUSDT",
+    "ALCHUSDT",     "COAIUSDT",
+
+    # Gaming / social
+    "MEUSDT",       "PLAYERUSDT",   "MOVEUSDT",
+
+    # Meme / narrative
+    "FARTCOINUSDT", "SPXUSDT",      "PIPUSDT",      "POPCATUSDT",
+    "MOODENGUSDT",  "MOGUSDT",      "MEWUSDT",      "TOSHIUSDT",
+    "DOODUSDT",     "BIRBUSDT",
+
+    # New L1 / L2 / chain infrastructure
+    "VANAUSDT",     "KAIAUSDT",     "BERAUSDT",     "SONICUSDT",
+    "ZETAUSDT",     "SOONUSDT",     "IRYSUSDT",     "PEAQUSDT",
+    "SQDUSDT",      "CARVUSDT",     "ZORAUSDT",     "MAGMAUSDT",
+    "ALEOUSDT",     "MERLUSDT",     "FLUIDUSDT",    "SAFEUSDT",
+    "MYXUSDT",      "VELOUSDT",     "NAORIUSDT",    "KGENUSDT",
+    "B3USDT",       "CROSSUSDT",
 }

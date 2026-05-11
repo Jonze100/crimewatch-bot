@@ -1,4 +1,4 @@
-import asyncio, logging, datetime, os, json
+import asyncio, logging, datetime, os, json, signal
 import aiohttp
 from aiohttp import web
 from telegram import Update
@@ -130,7 +130,8 @@ def fmt(r):
                  f"_({r.get('exchange','Binance')} | {sc}/100 {lbl}{label_str})_",
                  "⚡ Binance Alpha token — higher retail attention + narrative fuel"]
     else:
-        lines = [f"🔮 *{r['symbol']}* {r.get('exchange','Binance')}  |  *{sc}/100 ({lbl})*{label_str}"]
+        lines = [f"🚨 *CRIME PUMP SETUP DETECTED — {r['symbol']}*",
+                 f"_({r.get('exchange','Binance')} | {sc}/100 {lbl}{label_str})_"]
     if dyn_sc > 0:
         lines.append(f"_Score: Static {stat_sc} + Dynamic +{dyn_sc}_")
     lines += [
@@ -233,9 +234,7 @@ async def market_scan_loop(app):
         await asyncio.sleep(SCAN_INTERVAL_MINUTES * 60)
 
 async def health_server():
-    port = int(os.environ.get("PORT", 0))
-    if not port:
-        return
+    port = int(os.environ.get("PORT", 8080))
     async def handle(request):
         logger.info(f"Health check hit: {request.method} {request.path} from {request.remote}")
         return web.Response(text="OK", content_type="text/plain")
@@ -250,29 +249,51 @@ async def health_server():
 
 async def main():
     if not BOT_TOKEN:
-        logger.critical("BOT_TOKEN is not set — cannot start")
+        logger.critical("BOT_TOKEN is empty — exiting")
         return
 
     load_chat_ids()
     logger.info(f"Loaded {len(ALERT_CHAT_IDS)} alert chat ID(s)")
 
     req = HTTPXRequest(connect_timeout=30, read_timeout=30, write_timeout=30)
-    app = Application.builder().token(BOT_TOKEN).request(req).build()
-    for cmd, fn in [
-        ("start", start), ("scan", scan_cmd),
-        ("snooze", snooze_cmd), ("unsnooze", unsnooze_cmd),
-        ("status", status_cmd)
-    ]:
-        app.add_handler(CommandHandler(cmd, fn))
-    logger.info("Crime Watch — STO/ARIA/RAVE pattern detector active")
-    async with app:
-        await app.start()
-        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        asyncio.create_task(health_server())
-        asyncio.create_task(market_scan_loop(app))
-        await asyncio.Event().wait()
-        await app.updater.stop()
-        await app.stop()
+    application = Application.builder().token(BOT_TOKEN).request(req).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("scan", scan_cmd))
+    application.add_handler(CommandHandler("snooze", snooze_cmd))
+    application.add_handler(CommandHandler("unsnooze", unsnooze_cmd))
+    application.add_handler(CommandHandler("status", status_cmd))
+
+    stop_event = asyncio.Event()
+
+    def handle_signal():
+        logger.info("Shutdown signal received")
+        stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, handle_signal)
+        except NotImplementedError:
+            pass
+
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True
+    )
+
+    asyncio.create_task(market_scan_loop(application))
+    asyncio.create_task(health_server())
+
+    logger.info("Crime Watch — fully operational")
+    await stop_event.wait()
+
+    logger.info("Shutting down gracefully...")
+    await application.updater.stop()
+    await application.stop()
+    await application.shutdown()
 
 if __name__ == "__main__":
     asyncio.run(main())
