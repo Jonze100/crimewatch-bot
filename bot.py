@@ -41,20 +41,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ALERT_CHAT_IDS.append(chat_id)
         save_chat_ids()
     await update.message.reply_text(
-        "🔮 *Crime Watch — Strict Mode*\n\n"
-        "*🚨 CRIME PUMP filters (very strict):*\n"
-        "  • Volume ≤ $5M — complete dormancy\n"
-        "  • OI ≥ 3x volume — stealth accumulation\n"
-        "  • OI ≥ $5M — real money involved\n"
-        "  • L/S ≤ 0.70 — heavy short crowding\n"
-        "  • Price flat ≤ ±3% — pump not started\n"
-        "  • Funding ≤ +0.01% — no long crowding yet\n\n"
-        "  ✅ *CONFIRMED* — L/S < 0.60, funding < −0.005%, vol < $2M\n"
+        "🔮 *Crime Watch — Ultra Strict Mode*\n\n"
+        "*🚨 CRIME PUMP filters (ultra strict):*\n"
+        "  • Volume ≤ $2.5M — complete ghost town\n"
+        "  • OI ≥ 4.5x volume — ultra-stealth whale accumulation\n"
+        "  • OI ≥ $6M — serious money committed\n"
+        "  • L/S ≤ 0.63 — extreme short crowding\n"
+        "  • Price flat ≤ ±2% — pump absolutely not started\n"
+        "  • Funding ≤ +0.005% — zero long crowding\n\n"
+        "  ✅ *CONFIRMED* — L/S < 0.53, funding < −0.01%, vol < $1.5M\n"
         "  ⚠️ *POTENTIAL* — passes all filters, less extreme\n\n"
         "*Score thresholds:*\n"
-        "  🤖 AI narrative tokens — score ≥ 72\n"
-        "  🔥 Alpha tokens — score ≥ 75\n"
-        "  🚨 All others — score ≥ 80\n\n"
+        "  🤖 AI narrative tokens — score ≥ 80\n"
+        "  🔥 Alpha tokens — score ≥ 83\n"
+        "  🚨 All others — score ≥ 87\n\n"
         "• /scan SYMBOL — Manual scan\n"
         "• /status — Bot status\n"
         "• /snooze SYMBOL — Mute a token\n"
@@ -97,8 +97,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  • Last scan: {scan_stats['last_scan']}\n"
         f"  • Tokens scanned: {scan_stats['tokens_scanned']}\n"
         f"  • Alerts sent: {scan_stats['alerts_sent']}\n\n"
-        f"*Filters:* Vol ≤$5M | OI/Vol ≥3x | L/S ≤0.70 | OI ≥$5M | Price ≤±3%\n"
-        f"  Score: AI ≥72 | Alpha ≥75 | Others ≥80\n\n"
+        f"*Filters:* Vol ≤$2.5M | OI/Vol ≥4.5x | L/S ≤0.63 | OI ≥$6M | Price ≤±2%\n"
+        f"  Score: AI ≥80 | Alpha ≥83 | Others ≥87\n\n"
         f"  • Your chat ID: `{update.effective_chat.id}`",
         parse_mode="Markdown"
     )
@@ -224,14 +224,14 @@ async def market_scan_loop(app):
                         result["label"] = label
                         # Tiered thresholds: AI narrative most lenient, others strictest
                         if result.get("is_ai"):
-                            threshold = 72
-                        elif result.get("is_alpha"):
-                            threshold = 75
-                        else:
                             threshold = 80
+                        elif result.get("is_alpha"):
+                            threshold = 83
+                        else:
+                            threshold = 87
                         crime_fires = (is_crime
                                        and result["crime_score"] >= threshold
-                                       and result["crime_score"] > prev_crime + 12)
+                                       and result["crime_score"] > prev_crime + 15)
 
                         if crime_fires:
                             await send_crime_alert(app, result)
