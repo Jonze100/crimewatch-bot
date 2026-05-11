@@ -6,30 +6,21 @@ primary_region = 'fra'
 [env]
   PORT = "8080"
 
-[[services]]
+[http_service]
   internal_port = 8080
-  protocol = "tcp"
+  force_https = true
   auto_stop_machines = false
-  auto_start_machines = true
+  auto_start_machines = false
   min_machines_running = 1
 
-  [[services.ports]]
-    port = 80
-    handlers = ["http"]
-
-  [[services.ports]]
-    port = 443
-    handlers = ["tls", "http"]
-
-  [services.concurrency]
-    hard_limit = 25
-    soft_limit = 20
-
-[checks]
-  [checks.alive]
-    type = "http"
+  [[http_service.checks]]
     interval = "30s"
     timeout = "10s"
+    grace_period = "60s"
+    method = "GET"
     path = "/health"
-    grace_period = "30s"
-    port = 8080
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
