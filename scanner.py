@@ -1,8 +1,11 @@
-import aiohttp, asyncio, logging
+import aiohttp, asyncio, logging, json, os, time
 from memory import detect_dynamic_signals, load_memory
 from alpha_tokens import ALPHA_TOKENS
 logger = logging.getLogger(__name__)
 load_memory()
+
+SYMBOLS_CACHE_FILE = "binance_symbols.json"
+SYMBOLS_CACHE_TTL  = 86400  # 24 hours
 
 BINANCE_ENDPOINTS = [
     "https://fapi.binance.com",
@@ -10,7 +13,8 @@ BINANCE_ENDPOINTS = [
     "https://fapi2.binance.com",
     "https://fapi3.binance.com",
 ]
-BINANCE_SPOT = "https://api.binance.com/api/v3"
+BINANCE_SPOT    = "https://api.binance.com/api/v3"
+COINGECKO_PERPS = "https://api.coingecko.com/api/v3/derivatives/exchanges/binance_futures"
 BITUNIX = "https://fapi.bitunix.com"
 
 async def safe_get(session, url, retries=1):
@@ -41,21 +45,62 @@ async def safe_get(session, url, retries=1):
             return None
     return None
 
-async def get_binance_symbols(session):
-    for base in BINANCE_ENDPOINTS:
-        data = await safe_get(session, f"{base}/fapi/v1/ticker/24hr")
-        if data and isinstance(data, list):
-            usdt = [t for t in data if t.get("symbol","").endswith("USDT")]
-            usdt.sort(key=lambda x: float(x.get("quoteVolume",0)), reverse=True)
-            return [t["symbol"] for t in usdt]
-    # Last resort: spot API — same symbol names, different volume profile
-    logger.warning("All fapi endpoints failed for symbol list, trying spot API")
-    data = await safe_get(session, f"{BINANCE_SPOT}/ticker/24hr")
-    if data and isinstance(data, list):
-        usdt = [t for t in data if t.get("symbol","").endswith("USDT")]
-        usdt.sort(key=lambda x: float(x.get("quoteVolume",0)), reverse=True)
-        return [t["symbol"] for t in usdt]
-    return []
+async def get_binance_symbols():
+    # 1. Check cache (under 24 hours old)
+    if os.path.exists(SYMBOLS_CACHE_FILE):
+        try:
+            with open(SYMBOLS_CACHE_FILE) as f:
+                cached = json.load(f)
+            if time.time() - cached.get("ts", 0) < SYMBOLS_CACHE_TTL:
+                symbols = cached.get("symbols", [])
+                if symbols:
+                    logger.info(f"Loaded {len(symbols)} symbols from cache")
+                    return symbols
+        except Exception as e:
+            logger.warning(f"Cache read failed: {e}")
+
+    # 2. Fetch ALL symbols from CoinGecko with pagination (per_page=100)
+    logger.info("Fetching symbol list from CoinGecko derivatives (paginated)...")
+    try:
+        async with aiohttp.ClientSession(
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as session:
+            seen, symbols, page = set(), [], 1
+            while True:
+                url = f"{COINGECKO_PERPS}?per_page=100&page={page}"
+                data = await safe_get(session, url)
+                if not data or not isinstance(data, dict):
+                    break
+                tickers = data.get("tickers", [])
+                if not tickers:
+                    break
+                for item in tickers:
+                    coin = item.get("coin", "")
+                    if not coin:
+                        continue
+                    sym = coin.upper() + "USDT"
+                    if sym not in seen:
+                        seen.add(sym)
+                        symbols.append(sym)
+                if len(tickers) < 100:
+                    break
+                page += 1
+
+            if symbols:
+                logger.info(f"CoinGecko returned {len(symbols)} symbols across {page} page(s)")
+                try:
+                    with open(SYMBOLS_CACHE_FILE, "w") as f:
+                        json.dump({"ts": time.time(), "symbols": symbols}, f)
+                except Exception as e:
+                    logger.warning(f"Cache write failed: {e}")
+                return symbols
+    except Exception as e:
+        logger.warning(f"CoinGecko fetch failed: {e}")
+
+    # 3. Emergency fallback — Alpha tokens are the most important to scan anyway
+    logger.error("CoinGecko failed — falling back to ALPHA_TOKENS emergency list")
+    return list(ALPHA_TOKENS)
 
 async def fetch_binance(session, symbol):
     for base in BINANCE_ENDPOINTS:

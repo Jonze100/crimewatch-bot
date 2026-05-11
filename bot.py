@@ -7,6 +7,7 @@ from telegram.request import HTTPXRequest
 from scanner import scan_token, get_binance_symbols
 from filters import is_crime_pump_setup
 from config import BOT_TOKEN, ALERT_CHAT_IDS, SCAN_INTERVAL_MINUTES, MIN_ALERT_SCORE
+from alpha_tokens import ALPHA_TOKENS
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -185,25 +186,21 @@ async def market_scan_loop(app):
         try:
             scan_stats["last_scan"] = datetime.datetime.now().strftime("%H:%M:%S")
             logger.info("Starting scan cycle...")
-            async with aiohttp.ClientSession(
-                headers={"User-Agent":"CrimeWatch/1.0"},
-                timeout=aiohttp.ClientTimeout(total=20)
-            ) as session:
-                symbols = await get_binance_symbols(session)
 
-            logger.info(f"get_binance_symbols returned {len(symbols)} symbols (attempt 1)")
-            if not symbols:
-                logger.warning("Attempt 1 returned 0 symbols — retrying with plain session")
-                async with aiohttp.ClientSession() as session:
-                    symbols = await get_binance_symbols(session)
-                logger.info(f"get_binance_symbols returned {len(symbols)} symbols (attempt 2)")
+            symbols = await get_binance_symbols()
+            logger.info(f"get_binance_symbols returned {len(symbols)} symbols")
 
             if not symbols:
-                logger.error("Binance API blocked or unreachable — 0 symbols after retry, skipping cycle")
+                logger.error("0 symbols returned — skipping cycle")
                 scan_stats["tokens_scanned"] = 0
             else:
+                # Alpha tokens scanned FIRST every cycle — highest priority, most likely pumps
+                alpha  = [s for s in symbols if s in ALPHA_TOKENS]
+                others = [s for s in symbols if s not in ALPHA_TOKENS]
+                logger.info(f"Priority split: {len(alpha)} alpha + {len(others)} others")
                 scan_stats["tokens_scanned"] = len(symbols)
-                for symbol in symbols:
+
+                for symbol in alpha + others:
                     if symbol in snoozed:
                         continue
                     try:
@@ -214,6 +211,7 @@ async def market_scan_loop(app):
                         prev_crime = last_alerted.get(symbol, 0)
                         is_crime, crime_reason, label = is_crime_pump_setup(result)
                         result["label"] = label
+                        # Alpha threshold: 60, non-Alpha threshold: 65 (MIN_ALERT_SCORE default)
                         threshold = MIN_ALERT_SCORE - 5 if result.get("is_alpha") else MIN_ALERT_SCORE
                         crime_fires = (is_crime
                                        and result["crime_score"] >= threshold
@@ -235,19 +233,20 @@ async def market_scan_loop(app):
         await asyncio.sleep(SCAN_INTERVAL_MINUTES * 60)
 
 async def health_server():
-    """Minimal HTTP server so Railway's health checks pass when PORT is set."""
     port = int(os.environ.get("PORT", 0))
     if not port:
         return
-    async def handle(_request):
-        return web.Response(text="OK")
+    async def handle(request):
+        logger.info(f"Health check hit: {request.method} {request.path} from {request.remote}")
+        return web.Response(text="OK", content_type="text/plain")
     srv = web.Application()
     srv.router.add_get("/", handle)
     srv.router.add_get("/health", handle)
     runner = web.AppRunner(srv)
     await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", port).start()
-    logger.info(f"Health server listening on port {port}")
+    site = web.TCPSite(runner, "0.0.0.0", port, shutdown_timeout=2.0)
+    await site.start()
+    logger.info(f"Health server listening on 0.0.0.0:{port}")
 
 async def main():
     if not BOT_TOKEN:
