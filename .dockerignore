@@ -1,2 +1,12 @@
 fly.toml
 .venv
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.save
+.git/
+scan_memory.json
+binance_symbols.json
+chat_ids.json
+watchlist.json

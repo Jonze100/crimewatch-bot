@@ -7,7 +7,7 @@ from telegram.request import HTTPXRequest
 from scanner import scan_token, get_binance_symbols
 from filters import is_crime_pump_setup
 from config import BOT_TOKEN, ALERT_CHAT_IDS, SCAN_INTERVAL_MINUTES, MIN_ALERT_SCORE
-from alpha_tokens import ALPHA_TOKENS
+from alpha_tokens import ALPHA_TOKENS, AI_NARRATIVE_TOKENS
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,16 +41,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ALERT_CHAT_IDS.append(chat_id)
         save_chat_ids()
     await update.message.reply_text(
-        "🔮 *Crime Watch*\n\n"
-        "*🚨 CRIME PUMP (STO/ARIA/RAVE pattern):*\n"
-        "  • Volume ≤ $8M — nobody watching\n"
-        "  • OI ≥ 2.5x volume — stealth buildup\n"
-        "  • OI ≥ $3M — real money involved\n"
-        "  • L/S ≤ 0.75 — shorts dominant\n"
-        "  • Price flat ≤ ±5% — pump not started\n"
-        "  • Funding ≤ +0.015% — no long crowding yet\n\n"
-        "  ✅ *CONFIRMED* — L/S < 0.67, funding negative, vol < $3M\n"
+        "🔮 *Crime Watch — Strict Mode*\n\n"
+        "*🚨 CRIME PUMP filters (very strict):*\n"
+        "  • Volume ≤ $5M — complete dormancy\n"
+        "  • OI ≥ 3x volume — stealth accumulation\n"
+        "  • OI ≥ $5M — real money involved\n"
+        "  • L/S ≤ 0.70 — heavy short crowding\n"
+        "  • Price flat ≤ ±3% — pump not started\n"
+        "  • Funding ≤ +0.01% — no long crowding yet\n\n"
+        "  ✅ *CONFIRMED* — L/S < 0.60, funding < −0.005%, vol < $2M\n"
         "  ⚠️ *POTENTIAL* — passes all filters, less extreme\n\n"
+        "*Score thresholds:*\n"
+        "  🤖 AI narrative tokens — score ≥ 72\n"
+        "  🔥 Alpha tokens — score ≥ 75\n"
+        "  🚨 All others — score ≥ 80\n\n"
         "• /scan SYMBOL — Manual scan\n"
         "• /status — Bot status\n"
         "• /snooze SYMBOL — Mute a token\n"
@@ -93,8 +97,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  • Last scan: {scan_stats['last_scan']}\n"
         f"  • Tokens scanned: {scan_stats['tokens_scanned']}\n"
         f"  • Alerts sent: {scan_stats['alerts_sent']}\n\n"
-        f"*Crime pump:* Vol ≤$8M | OI/Vol ≥2.5x | L/S ≤0.75 | OI ≥$3M\n"
-        f"  Min score: {MIN_ALERT_SCORE} | Fires on dynamic signal or score ≥90\n\n"
+        f"*Filters:* Vol ≤$5M | OI/Vol ≥3x | L/S ≤0.70 | OI ≥$5M | Price ≤±3%\n"
+        f"  Score: AI ≥72 | Alpha ≥75 | Others ≥80\n\n"
         f"  • Your chat ID: `{update.effective_chat.id}`",
         parse_mode="Markdown"
     )
@@ -125,7 +129,11 @@ def fmt(r):
     trade_url = f"https://www.bitunix.com/futures/{r['symbol']}"
     time_now  = datetime.datetime.utcnow().strftime("%H:%M UTC")
 
-    if r.get("is_alpha"):
+    if r.get("is_ai"):
+        lines = [f"🤖 *AI NARRATIVE — CRIME PUMP SETUP — {r['symbol']}*",
+                 f"_({r.get('exchange','Binance')} | {sc}/100 {lbl}{label_str})_",
+                 "⚡ AI narrative token — highest retail FOMO + pump catalyst potential"]
+    elif r.get("is_alpha"):
         lines = [f"🔥 *ALPHA TOKEN — CRIME PUMP SETUP DETECTED — {r['symbol']}*",
                  f"_({r.get('exchange','Binance')} | {sc}/100 {lbl}{label_str})_",
                  "⚡ Binance Alpha token — higher retail attention + narrative fuel"]
@@ -167,7 +175,9 @@ def fmt(r):
 
 async def send_crime_alert(app, result):
     label  = result.get("label", "SETUP")
-    if result.get("is_alpha"):
+    if result.get("is_ai"):
+        header = "🤖 AI NARRATIVE — CRIME PUMP SETUP"
+    elif result.get("is_alpha"):
         header = "🔥 ALPHA TOKEN — CRIME PUMP SETUP DETECTED"
     elif label == "CONFIRMED":
         header = "✅ CONFIRMED CRIME PUMP"
@@ -212,12 +222,16 @@ async def market_scan_loop(app):
                         prev_crime = last_alerted.get(symbol, 0)
                         is_crime, crime_reason, label = is_crime_pump_setup(result)
                         result["label"] = label
-                        # Alpha threshold: 60, non-Alpha threshold: 65 (MIN_ALERT_SCORE default)
-                        threshold = MIN_ALERT_SCORE - 5 if result.get("is_alpha") else MIN_ALERT_SCORE
+                        # Tiered thresholds: AI narrative most lenient, others strictest
+                        if result.get("is_ai"):
+                            threshold = 72
+                        elif result.get("is_alpha"):
+                            threshold = 75
+                        else:
+                            threshold = 80
                         crime_fires = (is_crime
                                        and result["crime_score"] >= threshold
-                                       and (result.get("dynamic_alert") or result["crime_score"] >= 90)
-                                       and result["crime_score"] > prev_crime + 8)
+                                       and result["crime_score"] > prev_crime + 12)
 
                         if crime_fires:
                             await send_crime_alert(app, result)
@@ -236,7 +250,7 @@ async def market_scan_loop(app):
 async def health_server():
     port = int(os.environ.get("PORT", 8080))
     async def handle(request):
-        logger.info(f"Health check hit: {request.method} {request.path} from {request.remote}")
+        logger.debug(f"Health check: {request.method} {request.path} from {request.remote}")
         return web.Response(text="OK", content_type="text/plain")
     srv = web.Application()
     srv.router.add_get("/", handle)
