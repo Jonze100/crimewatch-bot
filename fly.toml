@@ -32,3 +32,4 @@ primary_region = 'fra'
     timeout = "10s"
     path = "/health"
     grace_period = "30s"
+    port = 8080
