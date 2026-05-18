@@ -224,14 +224,14 @@ async def market_scan_loop(app):
                         result["label"] = label
                         # Tiered thresholds: AI narrative most lenient, others strictest
                         if result.get("is_ai"):
-                            threshold = 80
+                            threshold = 60
                         elif result.get("is_alpha"):
-                            threshold = 83
+                            threshold = 63
                         else:
-                            threshold = 87
+                            threshold = 65
                         crime_fires = (is_crime
                                        and result["crime_score"] >= threshold
-                                       and result["crime_score"] > prev_crime + 15)
+                                       and result["crime_score"] > prev_crime + 8)
 
                         if crime_fires:
                             await send_crime_alert(app, result)
